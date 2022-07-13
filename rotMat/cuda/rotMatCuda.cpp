@@ -1,4 +1,5 @@
-// Largely boilerplate gateway to cuda-enabled routines
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #include <torch/extension.h>
 
@@ -13,7 +14,6 @@ torch::Tensor rotMatBackwardCuda( torch::Tensor thetas, torch::Tensor U, torch::
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-
 torch::Tensor rotMatForward( torch::Tensor thetas, int64_t N, int threadsPerBlock)
 {
 
@@ -21,7 +21,6 @@ torch::Tensor rotMatForward( torch::Tensor thetas, int64_t N, int threadsPerBloc
 
   return rotMatForwardCuda( thetas, N, threadsPerBlock );
 }
-
 
 torch::Tensor rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tensor G, int threadsPerBlock )
 {
@@ -32,7 +31,6 @@ torch::Tensor rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tens
 
   return rotMatBackwardCuda( thetas, U, G, threadsPerBlock);
 }
-
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &rotMatForward, "Rotation Matrix forward (cuda)");

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CppExtension
 
