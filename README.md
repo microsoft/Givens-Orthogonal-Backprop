@@ -7,6 +7,10 @@ Allows for gradient descent over rotational matrices.
 To setup the pytorch extension, go to the source folder (cpp for serial execution on gpu, cuda for parallel execution on gpu) and run 'python setup.py install'
 An example NN layer is included in the GivensRotations.py files under the source folders.
 
+## How to file issues and get help
+
+This project uses GitHub Issues to track bugs and feature requests. Please search the existing issues before filing new issues to avoid duplicates. For new issues, file your bug or feature request as a new Issue. We'll try to address impactful issues. Please feel free to reach out fi you have any questions!
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
@@ -20,6 +24,3 @@ provided by the bot. You will only need to do this once across all repos using o
 This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
-
-## How to file issues and get help
-This project uses GitHub Issues to track bugs and feature requests. Please search the existing issues before filing new issues to avoid duplicates. For new issues, file your bug or feature request as a new Issue. We'll try to address impactful issues. Please feel free to reach out fi you have any questions!
