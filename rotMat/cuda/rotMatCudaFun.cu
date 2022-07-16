@@ -40,45 +40,118 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(const int i, const int j
   return j == deadIndex || (i > dMax && j > dMax);
 }
 
-template <typename scalar_t> __global__ void updateGivensElements(
+template <typename scalar_t> __global__ void updateGivensElementsRoundRobin(
   const scalar_t* const __restrict__ C,
   const scalar_t* const __restrict__ S,
   scalar_t* __restrict__ U,
   const size_t N,
   const int deadIndex,
   const size_t Ntilde,
-  const int dMax,
-  const int tournamentStep)
+  const int dMax)
 {
   // If transpose k works on rows; otherwise on columns
-  const int k = threadIdx.y + blockDim.y*blockIdx.y;
-  if (k >= N)
+  const int col = threadIdx.x + blockDim.x*blockIdx.x;
+  if (col >= N)
   {
     return;
   }
 
-  auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
-  const int i = rowIndices.first;
-  const int j = rowIndices.second;
-
-  if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+  const int rowPairIndex = threadIdx.y + blockDim.y * blockIdx.y;
+  const int playerCountInBlock = (blockDim.y *2);
+  for (int64_t tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
   {
-    return;
+    // rn 2*blockDepth-1 and ntilde-1 are eqaul, need to change what we pass to determineRowIndexPAir instead of ntilde
+    auto rowIndices = determineRowIndexPair(rowPairIndex, playerCountInBlock, tournamentStep);
+    const int i = blockDim.y * blockIdx.y + rowIndices.first;
+    const int j = blockDim.y * blockIdx.y + rowIndices.second;
+
+    if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+    {
+      return;
+    }
+
+    const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+    const scalar_t cij = C[thetaIndex];
+    const scalar_t sij = S[thetaIndex];
+
+    const int iOffset = i*N + col;
+    const int jOffset = j*N + col;
+
+    // Apply Givens: Update U's offsets
+    const scalar_t Ui = U[iOffset];
+    const scalar_t Uj = U[jOffset];
+
+    U[iOffset] = Ui*cij - Uj*sij;
+    U[jOffset] = Ui*sij + Uj*cij;
+
+  __syncthreads();
+  }
+}
+
+std::tuple<int64_t, int64_t, int64_t> determineRotMatConstants(const size_t nThetas, const size_t N)
+{
+  auto maxPairs = N*(N-1)/2;
+
+  // if nThetas == maxPairs
+  auto dMax = N-1;
+  if (nThetas < maxPairs)
+  {
+    auto K = int(1 + sqrt(1 - 4*(2*nThetas - N*(N-1)))) / 2;
+    dMax -= K;
   }
 
-  const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-  const scalar_t cij = C[thetaIndex];
-  const scalar_t sij = S[thetaIndex];
+  // Handle odd N; in that case Ntilde is the even augmented dimension
+  int64_t deadIndex = -1;
+  auto Ntilde = N;
+  if (N % 2 != 0)
+  {
+    Ntilde += 1;
+    deadIndex = Ntilde-1;
+  }
 
-  const int iOffset = i*N + k;
-  const int jOffset = j*N + k;
+  return std::make_tuple(dMax, deadIndex, Ntilde);
+}
 
-  // Apply Givens: Update U's offsets
-  const scalar_t Ui = U[iOffset];
-  const scalar_t Uj = U[jOffset];
+torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerBlock)
+{
+  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
+  auto dMax = std::get<0>(rotMatConstants);
+  auto deadIndex = std::get<1>(rotMatConstants);
+  auto Ntilde = std::get<2>(rotMatConstants);
 
-  U[iOffset] = Ui*cij - Uj*sij;
-  U[jOffset] = Ui*sij + Uj*cij;
+  // Set U same device and type as thetas
+  auto tensOptions = torch::TensorOptions()
+    .dtype(thetas.dtype())
+    .device(thetas.device());
+
+  auto U = torch::eye(N, tensOptions);
+
+  auto C = torch::cos(thetas.detach());
+  auto S = torch::sin(thetas.detach());
+
+  const int blockDepth = 16;
+  const int threadsPerRow = threadsPerBlock/blockDepth;
+  const dim3 threads(threadsPerRow, blockDepth);
+
+  const int nBlocksX = N/threadsPerRow + (N % threadsPerRow != 0);
+  const int nBlocksY = (Ntilde / 2)/blockDepth + ((Ntilde/2) % blockDepth != 0);
+  const dim3 blocks(nBlocksX, nBlocksY);
+
+  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
+  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
+  //for (int64_t tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep-= 2*blockDepth-1)
+  {
+    AT_DISPATCH_FLOATING_TYPES(
+      thetas.type(),
+      "rotMatForwardCuda",
+      ([&]{ updateGivensElementsRoundRobin<scalar_t><<<blocks,threads>>>(
+        C.data_ptr<scalar_t>(),
+        S.data_ptr<scalar_t>(),
+        U.data_ptr<scalar_t>(),
+        N, deadIndex, Ntilde, dMax);}));
+  }
+
+  return U;
 }
 
 template <typename scalar_t> __global__ void setA(
@@ -164,71 +237,6 @@ template <typename scalar_t> __global__ void setJVP(
 
   const int thetaIndx = i*N - (i + 2)*(i + 1)/2 + j;
   JVP[thetaIndx] = Asum[blockIdx.x];
-}
-
-std::tuple<int64_t, int64_t, int64_t> determineRotMatConstants(const size_t nThetas, const size_t N)
-{
-  auto maxPairs = N*(N-1)/2;
-
-  // if nThetas == maxPairs
-  auto dMax = N-1;
-  if (nThetas < maxPairs)
-  {
-    auto K = int(1 + sqrt(1 - 4*(2*nThetas - N*(N-1)))) / 2;
-    dMax -= K;
-  }
-
-  // Handle odd N; in that case Ntilde is the even augmented dimension
-  int64_t deadIndex = -1;
-  auto Ntilde = N;
-  if (N % 2 != 0)
-  {
-    Ntilde += 1;
-    deadIndex = Ntilde-1;
-  }
-
-  return std::make_tuple(dMax, deadIndex, Ntilde);
-}
-
-torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerBlock)
-{
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
-  auto dMax = std::get<0>(rotMatConstants);
-  auto deadIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
-
-  // Set U same device and type as thetas
-  auto tensOptions = torch::TensorOptions()
-    .dtype(thetas.dtype())
-    .device(thetas.device());
-
-  auto U = torch::eye(N, tensOptions);
-
-  auto C = torch::cos(thetas.detach());
-  auto S = torch::sin(thetas.detach());
-
-  // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
-  const int nBlocksY = N/threadsPerBlock + (N % threadsPerBlock != 0);
-  const int nBlocksX = Ntilde / 2;
-
-  const dim3 blocks(nBlocksX, nBlocksY);
-  const dim3 threads(1, threadsPerBlock);
-
-  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
-  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
-  for (int64_t tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
-  {
-    AT_DISPATCH_FLOATING_TYPES(
-      thetas.type(),
-      "rotMatForwardCuda",
-      ([&]{ updateGivensElements<scalar_t><<<blocks,threads>>>(
-        C.data_ptr<scalar_t>(),
-        S.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(),
-        N, deadIndex, Ntilde, dMax, tournamentStep);}));
-  }
-
-  return U;
 }
 
 torch::Tensor rotMatBackwardCuda(
