@@ -54,24 +54,27 @@ template <typename scalar_t> __global__ void updateGivensElementsRoundRobin(
   const int dMax)
 {
   // If transpose k works on rows; otherwise on columns
-  const int col = threadIdx.x + blockDim.x*blockIdx.x;
+  const int col = threadIdx.x + blockDim.x*blockIdx.x; 
   if (col >= N)
   {
     return;
   }
 
-  const int rowPairIndex = threadIdx.y + blockDim.y * blockIdx.y;
   const int playerCountInBlock = (blockDim.y *2);
-  for (int64_t tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
+  const int blockStart = playerCountInBlock * blockIdx.y;
+
+  //printf("blockidx %d threadidx %d col %d, player count %d\n", blockIdx.x, threadIdx.x, col, playerCountInBlock);
+  for (int tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
   {
-    // rn 2*blockDepth-1 and ntilde-1 are eqaul, need to change what we pass to determineRowIndexPAir instead of ntilde
-    auto rowIndices = determineRowIndexPair(rowPairIndex, playerCountInBlock, tournamentStep);
-    const int i = blockDim.y * blockIdx.y + rowIndices.first;
-    const int j = blockDim.y * blockIdx.y + rowIndices.second;
+    auto rowIndices = determineRowIndexPair(threadIdx.y, playerCountInBlock, tournamentStep);
+    const int i = blockStart + rowIndices.first;
+    const int j = blockStart + rowIndices.second;
+    //printf("block id %d thread id %d blockstart %d i %d j %d \n", blockIdx.y, threadIdx.y, blockStart, i, j);
 
     if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
     {
-      return;
+      __syncthreads();
+      continue;
     }
 
     const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
@@ -88,6 +91,11 @@ template <typename scalar_t> __global__ void updateGivensElementsRoundRobin(
     U[iOffset] = Ui*cij - Uj*sij;
     U[jOffset] = Ui*sij + Uj*cij;
 
+    if(threadIdx.x == 0 && threadIdx.y == 0)
+    {
+      printf("step %d :: just done with i %d and j %d on column %d\n", tournamentStep, i, j, col);
+    }
+    
   __syncthreads();
   }
 }
@@ -111,19 +119,22 @@ template <typename scalar_t> __global__ void updateGivensElementsConveyorBelt(
 
   // rn 2*blockDepth-1 and ntilde-1 are eqaul, need to change what we pass to determineRowIndexPAir instead of ntilde
   auto rowIndices = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
-
-  const int i =  blockDim.y * rowIndices.first + threadIdx.y; // home team
-  const int jStart = blockDim.y * rowIndices.second;
-  const int jEnd = jStart + blockDim.y;
-  int j = jStart + threadIdx.y;
-
+  
+  const int playerCountPerTeam = blockDim.y;
+  const int playerCountPerBlock = playerCountPerTeam * 2;
+  const int i =  playerCountPerBlock * rowIndices.first + threadIdx.y; // home team
   const int iOffset = i*N + col;
+  
+  const int jStart = playerCountPerBlock * rowIndices.second + playerCountPerTeam;
+  const int jEnd = jStart + playerCountPerTeam;
+  int j = jStart + threadIdx.y;
+  
   scalar_t Ui = U[iOffset];
-  for (int step =0; step < blockDim.y; step++, j++)
+  for (int step =0; step < playerCountPerTeam; step++, j++)
   {
     if (j >= jEnd)
     {
-      j -= blockDim.y;
+      j -= playerCountPerTeam;
     }
     
     if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
@@ -143,9 +154,16 @@ template <typename scalar_t> __global__ void updateGivensElementsConveyorBelt(
     Ui = Ui*cij - Uj*sij;
     U[jOffset] = Ui*sij + Uj*cij;
 
+
+    if(blockIdx.y == 0 && threadIdx.x == 0 && blockIdx.x == 0)
+    {
+      printf("step %d -> thread %d, just done with i %d and j %d on column %d\n", step,threadIdx.y, i, j, col);
+
+    }
     __syncthreads();
   }
-   U[iOffset] = Ui;
+
+  U[iOffset] = Ui;
 }
 
 std::tuple<int64_t, int64_t, int64_t> determineRotMatConstants(const size_t nThetas, const size_t N)
@@ -189,15 +207,14 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerB
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
-  const int intraTeamTournamentBlockDepth = 8;
-  const int interTeamTournamentBlockDepth = 16;
+  const int intraTeamTournamentBlockDepth = 4;
+  const int interTeamTournamentBlockDepth = 8;
 
-  int threadsPerRow = threadsPerBlock/intraTeamTournamentBlockDepth;
-  const dim3 threads(threadsPerRow, intraTeamTournamentBlockDepth);
-  cout << threadsPerBlock<< "\n";
+  int threadsPerRow = threadsPerBlock/intraTeamTournamentBlockDepth; // 128
+  const dim3 threads(threadsPerRow, intraTeamTournamentBlockDepth); // 128, 4
   
-  int nBlocksX = (N/threadsPerRow) + (N %threadsPerRow != 0);
-  int nBlocksY = ((Ntilde / 2)/intraTeamTournamentBlockDepth) + ((Ntilde / 2) % intraTeamTournamentBlockDepth != 0);
+  int nBlocksX = (N/threadsPerRow) + (N %threadsPerRow != 0); // 1
+  int nBlocksY = ((Ntilde / 2)/intraTeamTournamentBlockDepth) + ((Ntilde / 2) % intraTeamTournamentBlockDepth != 0); // 2
   const dim3 blocks(nBlocksX, nBlocksY);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
@@ -211,6 +228,8 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerB
       U.data_ptr<scalar_t>(),
       N, deadIndex, dMax);}));
   
+  cudaDeviceSynchronize();
+  cout << "\n\n"; 
   int stepsLeft = Ntilde - (intraTeamTournamentBlockDepth * 2);
   if (stepsLeft <= 0 )
   {
@@ -220,15 +239,15 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerB
   threadsPerRow = threadsPerBlock/interTeamTournamentBlockDepth;
   const dim3 threads2(threadsPerRow, interTeamTournamentBlockDepth);
   
-  nBlocksX = (N/threadsPerRow) + (N%threadsPerRow != 0);
-
-  nBlocksY = ((Ntilde / 2)/interTeamTournamentBlockDepth) + ((Ntilde / 2)% interTeamTournamentBlockDepth != 0);
-  const dim3 blocks2(nBlocksX, nBlocksY);
+  const int nBlocksX2 = (N/threadsPerRow) + (N%threadsPerRow != 0);
+  const int nBlocksY2 = ((Ntilde / 2)/interTeamTournamentBlockDepth) + ((Ntilde / 2)% interTeamTournamentBlockDepth != 0);
+  const dim3 blocks2(nBlocksX2, nBlocksY2);
 
   const int teamCount = (Ntilde/interTeamTournamentBlockDepth) + (Ntilde%interTeamTournamentBlockDepth != 0);
   for (int tournamentStep=teamCount-2; tournamentStep>=0; tournamentStep--)
   {
-    if (interTeamTournamentBlockDepth == intraTeamTournamentBlockDepth && tournamentStep == 1)
+    if (tournamentStep == 1 && 
+        interTeamTournamentBlockDepth == intraTeamTournamentBlockDepth)
     {
       continue;
     }

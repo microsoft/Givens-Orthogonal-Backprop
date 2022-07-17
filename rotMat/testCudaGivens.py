@@ -13,9 +13,9 @@ dtype = torch.float32
 # To have same results
 torch.manual_seed(0)
 
-dispResults = True
+dispResults = False
 
-N = 32
+N = 16
 M = N
 K = N-M
 useFrame = False
@@ -137,6 +137,6 @@ if dispResults:
 if dispResults:
     print("\n\nComparison of custom and autodiff:\n---------------------------------")
     print("Max abs deviation of forwards: ")
-    print(torch.absolute(Ucustom-UPyTorch).max())
-    print("Max abs deviation of grads: ")
-    print(torch.absolute(thetas.grad-gradCustom).max())
+print(torch.absolute(Ucustom-UPyTorch).max())
+print("Max abs deviation of grads: ")
+print(torch.absolute(thetas.grad-gradCustom).max())
