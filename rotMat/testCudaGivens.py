@@ -136,7 +136,11 @@ if dispResults:
 
 if dispResults:
     print("\n\nComparison of custom and autodiff:\n---------------------------------")
-    print("Max abs deviation of forwards: ")
+print("Max abs deviation of forwards: ")
 print(torch.absolute(Ucustom-UPyTorch).max())
 print("Max abs deviation of grads: ")
 print(torch.absolute(thetas.grad-gradCustom).max())
+
+
+print("Determinant: ", torch.det(Ucustom))
+print("Determinant upytorch: ", torch.det(UPyTorch))
