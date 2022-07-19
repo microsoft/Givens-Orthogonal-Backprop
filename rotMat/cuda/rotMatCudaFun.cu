@@ -91,12 +91,12 @@ __device__ void warpReduceAtBackward(volatile float* sdata, int tid)
   if (ThreadsPerBlockBackward >= 2) sdata[tid] += sdata[tid + 1];
 }
 
-__global__ void setA(
-  const float* const __restrict__ C,
-  const float* const __restrict__ S,
+__global__ void setJVP(
   at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> M,
   at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits>UfTrans,
-  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits>  A,
+  const float* const __restrict__ C,
+  const float* const __restrict__ S,
+  float* __restrict__ JVP,
   const int deadIndex,
   const int Ntilde,
   const int dMax,
@@ -121,6 +121,7 @@ __global__ void setA(
 
   if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
   {
+    sA[tid] = 0;
     return;
   }
 
@@ -164,29 +165,7 @@ __global__ void setA(
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
   if(tid <32) warpReduceAtBackward(sA,tid);
   
-  if (tid == 0) A[thetaIndex][blockIdx.y] = sA[0];
-}
-
- __global__ void setJVP(
-  const float* __restrict__ Asum,
-  float* __restrict__ JVP,
-  const size_t N,
-  const int deadIndex,
-  const size_t Ntilde,
-  const int dMax,
-  const int tournamentStep)
-{
-  auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
-  int i = rowIndices.first;
-  int j = rowIndices.second;
-
-  if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
-  {
-    return;
-  }
-
-  const int thetaIndx = i*N - (i + 2)*(i + 1)/2 + j;
-  JVP[thetaIndx] = Asum[blockIdx.x];
+  if (tid == 0) atomicAdd(&JVP[thetaIndex], sA[0]);
 }
 
 std::tuple<int64_t, int64_t, int64_t> determineRotMatConstants(const size_t nThetas, const size_t N)
@@ -271,13 +250,11 @@ torch::Tensor rotMatBackwardCuda(
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
+  auto JVP = torch::zeros_like(thetas, tensOptions);
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
   const int nBlocksX = Ntilde / 2;
   const int nBlocksY = N/ThreadsPerBlockBackward + (N % ThreadsPerBlockBackward != 0);
-  
-  // Note 0 dim is Ntilde not N
-  auto A = torch::zeros({thetas.size(0), nBlocksY}, tensOptions).detach();
 
   const dim3 blocks(nBlocksX, nBlocksY);
   const dim3 threads(1, ThreadsPerBlockBackward);
@@ -287,14 +264,14 @@ torch::Tensor rotMatBackwardCuda(
   for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
     // Set A els
-    setA<<<blocks,threads, sizeof(float) * ThreadsPerBlockBackward>>>(
-        C.data_ptr<float>(),
-        S.data_ptr<float>(),
+    setJVP<<<blocks,threads, sizeof(float) * ThreadsPerBlockBackward>>>(
         M.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
         UfTrans.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
-        A.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
+        C.data_ptr<float>(),
+        S.data_ptr<float>(),
+        JVP.data_ptr<float>(),
         deadIndex, Ntilde, dMax, tournamentStep);
   }
   
-  return A.sum(1);
+  return JVP;
 }
