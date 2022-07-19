@@ -9,6 +9,8 @@
 #include <functional>
 #include <vector>
 
+#define threadsPerBlock 16
+
 using namespace torch::indexing;
 
 __device__ __forceinline__ std::pair<const int, const int> determineRowIndexPair(
@@ -40,10 +42,10 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(const int i, const int j
   return j == deadIndex || (i > dMax && j > dMax);
 }
 
-template <typename scalar_t> __global__ void updateGivensElements(
-  const scalar_t* const __restrict__ C,
-  const scalar_t* const __restrict__ S,
-  scalar_t* __restrict__ U,
+ __global__ void updateGivensElements(
+  const float* const __restrict__ C,
+  const float* const __restrict__ S,
+  float* __restrict__ U,
   const size_t N,
   const int deadIndex,
   const size_t Ntilde,
@@ -67,36 +69,51 @@ template <typename scalar_t> __global__ void updateGivensElements(
   }
 
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-  const scalar_t cij = C[thetaIndex];
-  const scalar_t sij = S[thetaIndex];
+  const float cij = C[thetaIndex];
+  const float sij = S[thetaIndex];
 
   const int iOffset = i*N + k;
   const int jOffset = j*N + k;
 
   // Apply Givens: Update U's offsets
-  const scalar_t Ui = U[iOffset];
-  const scalar_t Uj = U[jOffset];
+  const float Ui = U[iOffset];
+  const float Uj = U[jOffset];
 
   U[iOffset] = Ui*cij - Uj*sij;
   U[jOffset] = Ui*sij + Uj*cij;
 }
 
-template <typename scalar_t> __global__ void setA(
-  const scalar_t* const __restrict__ C,
-  const scalar_t* const __restrict__ S,
-  scalar_t* __restrict__ M,
-  scalar_t* __restrict__ UfTrans,
-  scalar_t* __restrict__ A,
-  const size_t N,
+__device__ void warpReduce(volatile float* sdata, int tid)
+{
+  if (threadsPerBlock >= 64)  sdata[tid] += sdata[tid + 32];
+  if (threadsPerBlock >= 32) sdata[tid] += sdata[tid + 16];
+  if (threadsPerBlock >= 16) sdata[tid] += sdata[tid + 8];
+  if (threadsPerBlock >= 8) sdata[tid] += sdata[tid + 4];
+  if (threadsPerBlock >= 4) sdata[tid] += sdata[tid + 2];
+  if (threadsPerBlock >= 2) sdata[tid] += sdata[tid + 1];
+}
+
+__global__ void setA(
+  const float* const __restrict__ C,
+  const float* const __restrict__ S,
+  float* __restrict__ M,
+  float* __restrict__ UfTrans,
+  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> A,
+  const int N,
   const int deadIndex,
-  const size_t Ntilde,
+  const int Ntilde,
   const int dMax,
   const int tournamentStep)
 {
+
+  extern __shared__ float sA[];
+
   // k is the column index of M and the row index of Uf, to set col of A
-  const int k = threadIdx.y + blockDim.y*blockIdx.y;
+  const int tid = threadIdx.y;
+  const int k = tid + blockDim.y*blockIdx.y;
   if (k >= N)
   {
+    sA[tid] = 0;
     return;
   }
 
@@ -110,43 +127,53 @@ template <typename scalar_t> __global__ void setA(
   }
 
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-  const scalar_t cij = C[thetaIndex];
-  const scalar_t sij = S[thetaIndex];
+  const float cij = C[thetaIndex];
+  const float sij = S[thetaIndex];
 
   // Apply Givens: Update U's offsets
   const int ik = i*N + k;
   const int jk = j*N + k;
 
-  const scalar_t Ui = UfTrans[ik];
-  const scalar_t Uj = UfTrans[jk];
+  const float Ui = UfTrans[ik];
+  const float Uj = UfTrans[jk];
 
-  const scalar_t newUfTik = Ui*cij - Uj*sij;
+  const float newUfTik = Ui*cij - Uj*sij;
   UfTrans[ik] = newUfTik;
 
-  const scalar_t newUfTjk = Ui*sij + Uj*cij;
+  const float newUfTjk = Ui*sij + Uj*cij;
   UfTrans[jk] = newUfTjk;
 
   // Repeat for M
-  const scalar_t Mi = M[ik];
-  const scalar_t Mj = M[jk];
+  const float Mi = M[ik];
+  const float Mj = M[jk];
 
-  const scalar_t newMik = Mi*cij - Mj*sij;
+  const float newMik = Mi*cij - Mj*sij;
   M[ik] = newMik;
 
-  const scalar_t newMjk = Mi*sij + Mj*cij;
+  const float newMjk = Mi*sij + Mj*cij;
   M[jk] = newMjk;
 
   // Set A, skip a write if possible can
-  const scalar_t val = newMik * newUfTjk - newMjk * newUfTik;
-  if(val != 0)
-  {
-    A[k + blockIdx.x * N] = val;
-  }
+  sA[tid] = newMik * newUfTjk - newMjk * newUfTik;
+  __syncthreads();
+
+  // Reduce
+  if (threadsPerBlock == 1024) {
+    if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
+  if (threadsPerBlock >= 512) {
+    if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads();}
+  if (threadsPerBlock >= 256) {
+    if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
+  if (threadsPerBlock >= 128) {
+    if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
+  if(tid <32) warpReduce(sA,tid);
+  
+  if (tid == 0) A[thetaIndex][blockIdx.y] = sA[0];
 }
 
-template <typename scalar_t> __global__ void setJVP(
-  const scalar_t* __restrict__ Asum,
-  scalar_t* __restrict__ JVP,
+ __global__ void setJVP(
+  const float* __restrict__ Asum,
+  float* __restrict__ JVP,
   const size_t N,
   const int deadIndex,
   const size_t Ntilde,
@@ -190,7 +217,7 @@ std::tuple<int64_t, int64_t, int64_t> determineRotMatConstants(const size_t nThe
   return std::make_tuple(dMax, deadIndex, Ntilde);
 }
 
-torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerBlock)
+torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N)
 {
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
@@ -203,7 +230,6 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerB
     .device(thetas.device());
 
   auto U = torch::eye(N, tensOptions);
-
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
@@ -218,14 +244,11 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerB
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   for (int64_t tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
-    AT_DISPATCH_FLOATING_TYPES(
-      thetas.type(),
-      "rotMatForwardCuda",
-      ([&]{ updateGivensElements<scalar_t><<<blocks,threads>>>(
-        C.data_ptr<scalar_t>(),
-        S.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(),
-        N, deadIndex, Ntilde, dMax, tournamentStep);}));
+      updateGivensElements<<<blocks,threads>>>(
+        C.data_ptr<float>(),
+        S.data_ptr<float>(),
+        U.data_ptr<float>(),
+        N, deadIndex, Ntilde, dMax, tournamentStep);
   }
 
   return U;
@@ -234,8 +257,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N, int threadsPerB
 torch::Tensor rotMatBackwardCuda(
   torch::Tensor thetas,
   torch::Tensor U,
-  torch::Tensor G,
-  int threadsPerBlock)
+  torch::Tensor G)
 {
   auto N = U.size(0);
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
@@ -251,16 +273,8 @@ torch::Tensor rotMatBackwardCuda(
   // Loss gradient wrt U params
   auto JVP = torch::zeros_like(thetas, tensOptions);
 
-  // Note 0 dim is Ntilde not N
-  auto A = torch::zeros({Ntilde/2,N}, tensOptions).detach();
-
-  // Replaced to deal with frame setting
-  // auto M = G.detach().t().contiguous();
-  auto M = torch::zeros({N,N}, tensOptions);
-  M.index_put_({Slice(0,G.size(1)), Slice()}, G.detach().t());
-
-  // auto UfTrans = torch::clone(U.t());
-  auto UfTrans = U.t().contiguous();
+  auto M = G.t().contiguous().detach();
+  auto UfTrans = U.t().contiguous().detach();
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
@@ -268,40 +282,37 @@ torch::Tensor rotMatBackwardCuda(
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
   const int nBlocksX = Ntilde / 2;
   const int nBlocksY = N/threadsPerBlock + (N % threadsPerBlock != 0);
+  
+  // Note 0 dim is Ntilde not N
+  auto A = torch::zeros({thetas.size(0), nBlocksY}, tensOptions).detach();
 
   const dim3 blocks(nBlocksX, nBlocksY);
   const dim3 threads(1, threadsPerBlock);
 
-  cudaStream_t stream1;
-  cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
+  //cudaStream_t stream1;
+  //cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel.
   // There are n-1 steps
   for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
     // Set A els
-    AT_DISPATCH_FLOATING_TYPES(
-      thetas.type(),
-      "rotMatBackwardCuda",
-      ([&]{ setA<scalar_t><<<blocks,threads>>>(
-        C.data_ptr<scalar_t>(),
-        S.data_ptr<scalar_t>(),
-        M.data_ptr<scalar_t>(),
-        UfTrans.data_ptr<scalar_t>(),
-        A.data_ptr<scalar_t>(),
-        N, deadIndex, Ntilde, dMax, tournamentStep);}));
+    setA<<<blocks,threads, sizeof(float) * threadsPerBlock>>>(
+        C.data_ptr<float>(),
+        S.data_ptr<float>(),
+        M.data_ptr<float>(),
+        UfTrans.data_ptr<float>(),
+        A.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
+        N, deadIndex, Ntilde, dMax, tournamentStep);
 
     // Sum rows
-    cudaStreamSynchronize(stream1);
-    auto Asum = A.sum(1);
+    //cudaStreamSynchronize(stream1);
+    //auto Asum = A.sum(1);
 
     // Parallelized setting of JVP els from Asum; note here Ntilde/2 blocks, 1 thr/blck
-    AT_DISPATCH_FLOATING_TYPES(
-      thetas.type(),
-      "rotMatBackwardCuda",
-      ([&]{ setJVP<scalar_t><<<Ntilde/2,1,0,stream1>>>(Asum.data<scalar_t>(), JVP.data<scalar_t>(), N, deadIndex, Ntilde, dMax, tournamentStep);}));
+    //setJVP<<<nBlocksX,1,0,stream1>>>(Asum.data_ptr<float>(), JVP.data_ptr<float>(), N, deadIndex, Ntilde, dMax, tournamentStep);
   }
   
-  cudaStreamSynchronize(stream1);
-  return JVP;
+  //cudaStreamSynchronize(stream1);
+  return A.sum(1);
 }
