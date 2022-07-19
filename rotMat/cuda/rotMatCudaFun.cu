@@ -9,7 +9,8 @@
 #include <functional>
 #include <vector>
 
-#define ThreadsPerBlock 512
+#define ThreadsPerBlockForward 128
+#define ThreadsPerBlockBackward 256
 
 using namespace torch::indexing;
 
@@ -45,8 +46,7 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(const int i, const int j
  __global__ void updateGivensElements(
   const float* const __restrict__ C,
   const float* const __restrict__ S,
-  float* __restrict__ U,
-  const size_t N,
+  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> U,
   const int deadIndex,
   const size_t Ntilde,
   const int dMax,
@@ -54,55 +54,49 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(const int i, const int j
 {
   // If transpose k works on rows; otherwise on columns
   const int k = threadIdx.y + blockDim.y*blockIdx.y;
+  const int N = U.size(1);
   if (k >= N)
   {
     return;
   }
-  for(unsigned int rr=0; rr <= 8* blockDim.x; rr += blockDim.x)
+
+  auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
+  const int i = rowIndices.first;
+  const int j = rowIndices.second;
+
+  if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
   {
-    auto rowIndices = determineRowIndexPair(rr + blockIdx.x, Ntilde, tournamentStep);
-    const int i = rowIndices.first;
-    const int j = rowIndices.second;
-
-    if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
-    {
-      return;
-    }
-
-    __syncthreads();
-    const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-    const float cij = C[thetaIndex];
-    const float sij = S[thetaIndex];
-
-    const int iOffset = i*N + k;
-    const int jOffset = j*N + k;
-
-    // Apply Givens: Update U's offsets
-    const float Ui = U[iOffset];
-    const float Uj = U[jOffset];
-
-    U[iOffset] = Ui*cij - Uj*sij;
-    U[jOffset] = Ui*sij + Uj*cij;
+    return;
   }
+
+  const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+  const float cij = C[thetaIndex];
+  const float sij = S[thetaIndex];
+
+  // Apply Givens: Update U's offsets
+  const float Ui = U[i][k];
+  const float Uj = U[j][k];
+
+  U[i][k] = Ui*cij - Uj*sij;
+  U[j][k] = Ui*sij + Uj*cij;
 }
 
-__device__ void warpReduce(volatile float* sdata, int tid)
+__device__ void warpReduceAtBackward(volatile float* sdata, int tid)
 {
-  if (ThreadsPerBlock >= 64)  sdata[tid] += sdata[tid + 32];
-  if (ThreadsPerBlock >= 32) sdata[tid] += sdata[tid + 16];
-  if (ThreadsPerBlock >= 16) sdata[tid] += sdata[tid + 8];
-  if (ThreadsPerBlock >= 8) sdata[tid] += sdata[tid + 4];
-  if (ThreadsPerBlock >= 4) sdata[tid] += sdata[tid + 2];
-  if (ThreadsPerBlock >= 2) sdata[tid] += sdata[tid + 1];
+  if (ThreadsPerBlockBackward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (ThreadsPerBlockBackward >= 32) sdata[tid] += sdata[tid + 16];
+  if (ThreadsPerBlockBackward >= 16) sdata[tid] += sdata[tid + 8];
+  if (ThreadsPerBlockBackward >= 8) sdata[tid] += sdata[tid + 4];
+  if (ThreadsPerBlockBackward >= 4) sdata[tid] += sdata[tid + 2];
+  if (ThreadsPerBlockBackward >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 __global__ void setA(
-  at::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> C,
-  at::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> S,
+  const float* const __restrict__ C,
+  const float* const __restrict__ S,
   at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> M,
   at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits>UfTrans,
   at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits>  A,
-  const int N,
   const int deadIndex,
   const int Ntilde,
   const int dMax,
@@ -114,6 +108,7 @@ __global__ void setA(
   // k is the column index of M and the row index of Uf, to set col of A
   const int tid = threadIdx.y;
   const int k = tid + blockDim.y*blockIdx.y;
+  const int N = UfTrans.size(1);
   if (k >= N)
   {
     sA[tid] = 0;
@@ -159,15 +154,15 @@ __global__ void setA(
   __syncthreads();
 
   // Reduce
-  if (ThreadsPerBlock == 1024) {
+  if (ThreadsPerBlockBackward == 1024) {
     if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
-  if (ThreadsPerBlock >= 512) {
+  if (ThreadsPerBlockBackward >= 512) {
     if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads();}
-  if (ThreadsPerBlock >= 256) {
+  if (ThreadsPerBlockBackward >= 256) {
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-  if (ThreadsPerBlock >= 128) {
+  if (ThreadsPerBlockBackward >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if(tid <32) warpReduce(sA,tid);
+  if(tid <32) warpReduceAtBackward(sA,tid);
   
   if (tid == 0) A[thetaIndex][blockIdx.y] = sA[0];
 }
@@ -235,21 +230,21 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N)
   auto S = torch::sin(thetas.detach());
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
-  const int nBlocksY = N/ThreadsPerBlock + (N % ThreadsPerBlock != 0);
-  const int nBlocksX = Ntilde / 16;
+  const int nBlocksY = N/ThreadsPerBlockForward + (N % ThreadsPerBlockForward != 0);
+  const int nBlocksX = Ntilde / 2;
 
   const dim3 blocks(nBlocksX, nBlocksY);
-  const dim3 threads(1, ThreadsPerBlock);
+  const dim3 threads(1, ThreadsPerBlockForward);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   for (int64_t tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
-      updateGivensElements<<<blocks,threads, 2 * sizeof(float)>>>(
+      updateGivensElements<<<blocks,threads>>>(
         C.data_ptr<float>(),
         S.data_ptr<float>(),
-        U.data_ptr<float>(),
-        N, deadIndex, Ntilde, dMax, tournamentStep);
+        U.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
+        deadIndex, Ntilde, dMax, tournamentStep);
   }
 
   return U;
@@ -279,26 +274,26 @@ torch::Tensor rotMatBackwardCuda(
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
   const int nBlocksX = Ntilde / 2;
-  const int nBlocksY = N/ThreadsPerBlock + (N % ThreadsPerBlock != 0);
+  const int nBlocksY = N/ThreadsPerBlockBackward + (N % ThreadsPerBlockBackward != 0);
   
   // Note 0 dim is Ntilde not N
   auto A = torch::zeros({thetas.size(0), nBlocksY}, tensOptions).detach();
 
   const dim3 blocks(nBlocksX, nBlocksY);
-  const dim3 threads(1, ThreadsPerBlock);
+  const dim3 threads(1, ThreadsPerBlockBackward);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. here are n-1 steps
   for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
     // Set A els
-    setA<<<blocks,threads, sizeof(float) * ThreadsPerBlock>>>(
-        C.packed_accessor32<float, 1, at::RestrictPtrTraits>(),
-        S.packed_accessor32<float, 1, at::RestrictPtrTraits>(),
+    setA<<<blocks,threads, sizeof(float) * ThreadsPerBlockBackward>>>(
+        C.data_ptr<float>(),
+        S.data_ptr<float>(),
         M.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
         UfTrans.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
         A.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
-        N, deadIndex, Ntilde, dMax, tournamentStep);
+        deadIndex, Ntilde, dMax, tournamentStep);
   }
   
   return A.sum(1);
