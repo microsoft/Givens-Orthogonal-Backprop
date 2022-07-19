@@ -15,8 +15,8 @@ torch.manual_seed(0)
 
 dispResults = True
 
-N = 33
-M = 33
+N = 32
+M = 32
 K = N-M
 useFrame = False
 if useFrame is True:
@@ -140,3 +140,6 @@ if dispResults:
     print(torch.absolute(Ucustom-UPyTorch).max())
     print("Max abs deviation of grads: ")
     print(torch.absolute(thetas.grad-gradCustom).max())
+
+print(torch.det(Ucustom))
+print(torch.round(Ucustom @ Ucustom.t()))

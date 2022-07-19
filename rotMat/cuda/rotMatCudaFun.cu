@@ -9,7 +9,7 @@
 #include <functional>
 #include <vector>
 
-#define threadsPerBlock 16
+#define ThreadsPerBlock 512
 
 using namespace torch::indexing;
 
@@ -58,47 +58,50 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(const int i, const int j
   {
     return;
   }
-
-  auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
-  const int i = rowIndices.first;
-  const int j = rowIndices.second;
-
-  if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+  for(unsigned int rr=0; rr <= 8* blockDim.x; rr += blockDim.x)
   {
-    return;
+    auto rowIndices = determineRowIndexPair(rr + blockIdx.x, Ntilde, tournamentStep);
+    const int i = rowIndices.first;
+    const int j = rowIndices.second;
+
+    if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+    {
+      return;
+    }
+
+    __syncthreads();
+    const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+    const float cij = C[thetaIndex];
+    const float sij = S[thetaIndex];
+
+    const int iOffset = i*N + k;
+    const int jOffset = j*N + k;
+
+    // Apply Givens: Update U's offsets
+    const float Ui = U[iOffset];
+    const float Uj = U[jOffset];
+
+    U[iOffset] = Ui*cij - Uj*sij;
+    U[jOffset] = Ui*sij + Uj*cij;
   }
-
-  const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-  const float cij = C[thetaIndex];
-  const float sij = S[thetaIndex];
-
-  const int iOffset = i*N + k;
-  const int jOffset = j*N + k;
-
-  // Apply Givens: Update U's offsets
-  const float Ui = U[iOffset];
-  const float Uj = U[jOffset];
-
-  U[iOffset] = Ui*cij - Uj*sij;
-  U[jOffset] = Ui*sij + Uj*cij;
 }
 
 __device__ void warpReduce(volatile float* sdata, int tid)
 {
-  if (threadsPerBlock >= 64)  sdata[tid] += sdata[tid + 32];
-  if (threadsPerBlock >= 32) sdata[tid] += sdata[tid + 16];
-  if (threadsPerBlock >= 16) sdata[tid] += sdata[tid + 8];
-  if (threadsPerBlock >= 8) sdata[tid] += sdata[tid + 4];
-  if (threadsPerBlock >= 4) sdata[tid] += sdata[tid + 2];
-  if (threadsPerBlock >= 2) sdata[tid] += sdata[tid + 1];
+  if (ThreadsPerBlock >= 64)  sdata[tid] += sdata[tid + 32];
+  if (ThreadsPerBlock >= 32) sdata[tid] += sdata[tid + 16];
+  if (ThreadsPerBlock >= 16) sdata[tid] += sdata[tid + 8];
+  if (ThreadsPerBlock >= 8) sdata[tid] += sdata[tid + 4];
+  if (ThreadsPerBlock >= 4) sdata[tid] += sdata[tid + 2];
+  if (ThreadsPerBlock >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 __global__ void setA(
-  const float* const __restrict__ C,
-  const float* const __restrict__ S,
-  float* __restrict__ M,
-  float* __restrict__ UfTrans,
-  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> A,
+  at::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> C,
+  at::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> S,
+  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> M,
+  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits>UfTrans,
+  at::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits>  A,
   const int N,
   const int deadIndex,
   const int Ntilde,
@@ -126,45 +129,43 @@ __global__ void setA(
     return;
   }
 
+   __syncthreads();
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
   const float cij = C[thetaIndex];
   const float sij = S[thetaIndex];
 
   // Apply Givens: Update U's offsets
-  const int ik = i*N + k;
-  const int jk = j*N + k;
-
-  const float Ui = UfTrans[ik];
-  const float Uj = UfTrans[jk];
+  const float Ui = UfTrans[i][k];
+  const float Uj = UfTrans[j][k];
 
   const float newUfTik = Ui*cij - Uj*sij;
-  UfTrans[ik] = newUfTik;
+  UfTrans[i][k] = newUfTik;
 
   const float newUfTjk = Ui*sij + Uj*cij;
-  UfTrans[jk] = newUfTjk;
+  UfTrans[j][k] = newUfTjk;
 
   // Repeat for M
-  const float Mi = M[ik];
-  const float Mj = M[jk];
+  const float Mi = M[i][k];
+  const float Mj = M[j][k];
 
   const float newMik = Mi*cij - Mj*sij;
-  M[ik] = newMik;
+  M[i][k] = newMik;
 
   const float newMjk = Mi*sij + Mj*cij;
-  M[jk] = newMjk;
+  M[j][k] = newMjk;
 
   // Set A, skip a write if possible can
   sA[tid] = newMik * newUfTjk - newMjk * newUfTik;
   __syncthreads();
 
   // Reduce
-  if (threadsPerBlock == 1024) {
+  if (ThreadsPerBlock == 1024) {
     if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
-  if (threadsPerBlock >= 512) {
+  if (ThreadsPerBlock >= 512) {
     if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads();}
-  if (threadsPerBlock >= 256) {
+  if (ThreadsPerBlock >= 256) {
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-  if (threadsPerBlock >= 128) {
+  if (ThreadsPerBlock >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
   if(tid <32) warpReduce(sA,tid);
   
@@ -234,17 +235,17 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N)
   auto S = torch::sin(thetas.detach());
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
-  const int nBlocksY = N/threadsPerBlock + (N % threadsPerBlock != 0);
-  const int nBlocksX = Ntilde / 2;
+  const int nBlocksY = N/ThreadsPerBlock + (N % ThreadsPerBlock != 0);
+  const int nBlocksX = Ntilde / 16;
 
   const dim3 blocks(nBlocksX, nBlocksY);
-  const dim3 threads(1, threadsPerBlock);
+  const dim3 threads(1, ThreadsPerBlock);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   for (int64_t tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
-      updateGivensElements<<<blocks,threads>>>(
+      updateGivensElements<<<blocks,threads, 2 * sizeof(float)>>>(
         C.data_ptr<float>(),
         S.data_ptr<float>(),
         U.data_ptr<float>(),
@@ -270,9 +271,6 @@ torch::Tensor rotMatBackwardCuda(
     .dtype(thetas.dtype())
     .device(thetas.device());
 
-  // Loss gradient wrt U params
-  auto JVP = torch::zeros_like(thetas, tensOptions);
-
   auto M = G.t().contiguous().detach();
   auto UfTrans = U.t().contiguous().detach();
 
@@ -281,38 +279,27 @@ torch::Tensor rotMatBackwardCuda(
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
   const int nBlocksX = Ntilde / 2;
-  const int nBlocksY = N/threadsPerBlock + (N % threadsPerBlock != 0);
+  const int nBlocksY = N/ThreadsPerBlock + (N % ThreadsPerBlock != 0);
   
   // Note 0 dim is Ntilde not N
   auto A = torch::zeros({thetas.size(0), nBlocksY}, tensOptions).detach();
 
   const dim3 blocks(nBlocksX, nBlocksY);
-  const dim3 threads(1, threadsPerBlock);
+  const dim3 threads(1, ThreadsPerBlock);
 
-  //cudaStream_t stream1;
-  //cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
-  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel.
-  // There are n-1 steps
+  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. here are n-1 steps
   for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
     // Set A els
-    setA<<<blocks,threads, sizeof(float) * threadsPerBlock>>>(
-        C.data_ptr<float>(),
-        S.data_ptr<float>(),
-        M.data_ptr<float>(),
-        UfTrans.data_ptr<float>(),
+    setA<<<blocks,threads, sizeof(float) * ThreadsPerBlock>>>(
+        C.packed_accessor32<float, 1, at::RestrictPtrTraits>(),
+        S.packed_accessor32<float, 1, at::RestrictPtrTraits>(),
+        M.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
+        UfTrans.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
         A.packed_accessor32<float, 2, at::RestrictPtrTraits>(),
         N, deadIndex, Ntilde, dMax, tournamentStep);
-
-    // Sum rows
-    //cudaStreamSynchronize(stream1);
-    //auto Asum = A.sum(1);
-
-    // Parallelized setting of JVP els from Asum; note here Ntilde/2 blocks, 1 thr/blck
-    //setJVP<<<nBlocksX,1,0,stream1>>>(Asum.data_ptr<float>(), JVP.data_ptr<float>(), N, deadIndex, Ntilde, dMax, tournamentStep);
   }
   
-  //cudaStreamSynchronize(stream1);
   return A.sum(1);
 }
