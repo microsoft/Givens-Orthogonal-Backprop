@@ -15,8 +15,8 @@ torch.manual_seed(0)
 
 dispResults = True
 
-N = 32
-M = 32
+N = 15
+M = 3
 K = N-M
 useFrame = False
 if useFrame is True:

@@ -10,7 +10,7 @@ import time
 device = torch.device('cuda')
 dtype = torch.float32
 
-N = 2048
+N = 2000
 M = N
 K = N-M
 nThetas = int(N*(N-1)/2)
