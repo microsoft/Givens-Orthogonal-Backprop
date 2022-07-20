@@ -5,12 +5,11 @@ import math
 import os
 import torch
 import rotMatcuda as rotMatFn
+import time
 
 device = torch.device('cuda')
 dtype = torch.float32
 
-threadsPerBlock=1024
-print("threads per block:", threadsPerBlock)
 N = 2000
 M = N
 K = N-M
@@ -32,8 +31,9 @@ thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
 startFwd = torch.cuda.Event(enable_timing=True)
 endFwd = torch.cuda.Event(enable_timing=True)
 startFwd.record()
-U = rotMatFn.forward(thetas,N,threadsPerBlock)
+U = rotMatFn.forward(thetas,N)
 endFwd.record()
+torch.cuda.synchronize()
 # Waits for everything to finish running
 torch.cuda.synchronize()
 
@@ -44,7 +44,7 @@ print('Forward time: {0:.5f}'.format(forwardMilliseconds))
 startBck = torch.cuda.Event(enable_timing=True)
 endBck = torch.cuda.Event(enable_timing=True)
 startBck.record()
-JVP = rotMatFn.backward(thetas,U,G,threadsPerBlock)
+JVP = rotMatFn.backward(thetas,U,G)
 endBck.record()
 # Waits for everything to finish running
 torch.cuda.synchronize()

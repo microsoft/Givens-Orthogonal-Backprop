@@ -15,11 +15,11 @@ torch.manual_seed(0)
 
 dispResults = True
 
-N = 11
+N = 15
 M = 3
 K = N-M
-useFrame = False
-if useFrame is True:
+useFrame = True
+if useFrame:
     nCols = M
 else:
     nCols = N
@@ -140,3 +140,6 @@ if dispResults:
     print(torch.absolute(Ucustom-UPyTorch).max())
     print("Max abs deviation of grads: ")
     print(torch.absolute(thetas.grad-gradCustom).max())
+    if N == nCols:
+        print(torch.det(Ucustom))
+    print(torch.round(Ucustom @ Ucustom.t()))
