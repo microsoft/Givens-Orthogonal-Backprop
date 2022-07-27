@@ -16,19 +16,16 @@ torch.manual_seed(0)
 dispResults = True
 
 N = 15
-M = 3
+M = 15
 K = N-M
-useFrame = True
-if useFrame:
-    nCols = M
-else:
-    nCols = N
 
-rotUnit = GivensRotations.RotMat(N,M,useFrame).to(device)
+rotUnit = GivensRotations.RotMat(N, N).to(device)
 
-
+batch = 3
 # Loss grad when the loss is weighted sum of the els of U
-G = torch.randn(N,nCols).to(dtype).to(device)
+G = torch.randn(N,batch).to(dtype).to(device)
+X = torch.randn(N, batch).to(dtype).to(device)
+xx = torch.clone(X)
 
 # You *cannot* use time.time() to time cuda-enabled functions! The cpu
 # proceeds asynchronously, leading to ludicrous underestimates.
@@ -38,11 +35,12 @@ G = torch.randn(N,nCols).to(dtype).to(device)
 startFwd = torch.cuda.Event(enable_timing=True)
 endFwd = torch.cuda.Event(enable_timing=True)
 startFwd.record()
-Ucustom = rotUnit.forward()
+Ucustom = rotUnit.forward(X)
 endFwd.record()
 # Waits for everything to finish running
 torch.cuda.synchronize()
 
+#print(G.size(), Ucustom.size())
 loss = torch.sum(G*Ucustom)
 
 startBck = torch.cuda.Event(enable_timing=True)
@@ -73,7 +71,7 @@ if dispResults:
 # Compare to direct with PyTorch autodiff
 
 thetas = rotUnit.thetas.detach().to(torch.device('cpu')).requires_grad_(True)
-UPyTorch = torch.eye(N,nCols)
+UPyTorch = torch.clone(X).to('cpu')
 
 # (i,j) with indices larger than dMax are left out
 dMax = N-1
@@ -140,6 +138,3 @@ if dispResults:
     print(torch.absolute(Ucustom-UPyTorch).max())
     print("Max abs deviation of grads: ")
     print(torch.absolute(thetas.grad-gradCustom).max())
-    if N == nCols:
-        print(torch.det(Ucustom))
-    print(torch.round(Ucustom @ Ucustom.t()))

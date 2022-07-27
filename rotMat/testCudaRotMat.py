@@ -22,6 +22,8 @@ print("nThetas=" +str(nThetas) )
 
 G = torch.randn(N,N,requires_grad=True).to(dtype).to(device)
 thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
+X = torch.eye(N,M).to(dtype).to(device)
+
 
 # You *cannot* use time.time() to time cuda-enabled functions! The cpu
 # proceeds asynchronously, leading to ludicrous underestimates.
@@ -31,7 +33,7 @@ thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
 startFwd = torch.cuda.Event(enable_timing=True)
 endFwd = torch.cuda.Event(enable_timing=True)
 startFwd.record()
-U = rotMatFn.forward(thetas,N)
+U = rotMatFn.forward(X,thetas,N)
 endFwd.record()
 torch.cuda.synchronize()
 # Waits for everything to finish running

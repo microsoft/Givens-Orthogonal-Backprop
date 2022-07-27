@@ -77,8 +77,10 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
 {
   // If transpose k works on rows; otherwise on columns
   const int k = threadIdx.y + blockDim.y*blockIdx.y;
-  const int N = U.size(1);
-  if (k >= N)
+  
+  const int N = U.size(0);
+  const int M = U.size(1);
+  if (k >= M)
   {
     return;
   }
@@ -134,8 +136,9 @@ template <typename scalar_t>
   // k is the column index of M and the row index of Uf, to set col of A
   const int tid = threadIdx.y;
   const int k = tid + blockDim.y*blockIdx.y;
-  const int N = UfTrans.size(1);
-  if (k >= N)
+  
+  const int N = UfTrans.size(0);
+  if (k >= UfTrans.size(1))
   {
     sA[tid] = 0;
     return;
@@ -154,7 +157,7 @@ template <typename scalar_t>
    __syncthreads();
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
   const scalar_t cij = C[thetaIndex];
-  const scalar_t sij = S[thetaIndex];
+  const scalar_t sij = -1 * S[thetaIndex];
 
   // Apply Givens: Update U's offsets
   const scalar_t Ui = UfTrans[i][k];
@@ -178,7 +181,7 @@ template <typename scalar_t>
 
   // Set A, skip a write if possible can
   sA[tid] = newMik * newUfTjk - newMjk * newUfTik;
-  __syncthreads();
+  /*__syncthreads();
 
   // Reduce
   if (ThreadsPerRowBackward == 1024) {
@@ -189,9 +192,10 @@ template <typename scalar_t>
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
   if (ThreadsPerRowBackward >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if(tid <32) warpReduceAtBackward(sA,tid);
+  if(tid <32) warpReduceAtBackward(sA,tid);*/
   
-  if (tid == 0) atomicAdd(&JVP[thetaIndex], sA[0]);
+  //if (tid == 0) 
+  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
 
 std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int N)
@@ -215,7 +219,7 @@ std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int 
   return std::make_tuple(dMax, deadIndex, Ntilde);
 }
 
-torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N)
+torch::Tensor rotMatForwardCuda(torch::Tensor Uorg, torch::Tensor thetas, int N)
 {
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
@@ -227,12 +231,12 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N)
     .dtype(thetas.dtype())
     .device(thetas.device());
 
-  auto U = torch::eye(N, tensOptions);
+  auto U = torch::clone(Uorg).detach();
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
-  const int nBlocksY = N/ThreadsPerRowForward + (N % ThreadsPerRowForward != 0);
+  const int nBlocksY = U.size(1)/ThreadsPerRowForward + (U.size(1)% ThreadsPerRowForward != 0);
   const int nBlocksX = Ntilde / 2;
 
   const dim3 blocks(nBlocksX, nBlocksY);
@@ -258,6 +262,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor thetas, int64_t N)
 }
 
 torch::Tensor rotMatBackwardCuda(
+  torch::Tensor X,
   torch::Tensor thetas,
   torch::Tensor U,
   torch::Tensor G)
@@ -273,10 +278,15 @@ torch::Tensor rotMatBackwardCuda(
     .dtype(thetas.dtype())
     .device(thetas.device());
 
-  auto M = torch::zeros({N,N}, tensOptions);
+  auto M = torch::eye(N,N, tensOptions);
   M.index_put_({Slice(0, G.size(1)), Slice()}, G.detach().t());
+  M = torch::matmul(U, M);
+  //auto M = torch::clone(G);//.t().contiguous().detach();
 
-  auto UfTrans = U.t().contiguous().detach();
+  auto UfTrans = torch::eye(N,N, tensOptions);
+  //UfTrans.index_put_({Slice(0, U.size(1)), Slice()}, U.detach().t());
+  
+  ///auto UfTrans = torch::clone(U);// .t().contiguous().detach();
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
@@ -291,7 +301,7 @@ torch::Tensor rotMatBackwardCuda(
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. here are n-1 steps
-  for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
+  for (int tournamentStep=0; tournamentStep<=Ntilde-2; tournamentStep++)
   {
     AT_DISPATCH_FLOATING_TYPES(
       thetas.type(),
