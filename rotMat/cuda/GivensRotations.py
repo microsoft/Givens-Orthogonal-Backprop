@@ -18,7 +18,7 @@ class RotMatFunction(torch.autograd.Function):
 
         X, thetas, U = ctx.saved_tensors
         # Force the grad wrt outputs to be contiguous
-        thetaGrad = rotMatcuda.backward(torch.clone(X), thetas, U, lossGrad.contiguous())
+        thetaGrad = rotMatcuda.backward(thetas, torch.clone(U), lossGrad.contiguous())
 
         # "forward" took 3 inputs but we don't want the grad wrt N or nCols!
         return None, thetaGrad, None, None, None

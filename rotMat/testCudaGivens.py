@@ -25,7 +25,6 @@ batch = 3
 # Loss grad when the loss is weighted sum of the els of U
 G = torch.randn(N,batch).to(dtype).to(device)
 X = torch.randn(N, batch).to(dtype).to(device)
-xx = torch.clone(X)
 
 # You *cannot* use time.time() to time cuda-enabled functions! The cpu
 # proceeds asynchronously, leading to ludicrous underestimates.

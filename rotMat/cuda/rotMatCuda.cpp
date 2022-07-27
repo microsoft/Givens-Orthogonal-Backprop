@@ -6,7 +6,7 @@
 
 // Declarations to cuda-enabled functions
 torch::Tensor rotMatForwardCuda( torch::Tensor U, torch::Tensor thetas, int N);
-torch::Tensor rotMatBackwardCuda( torch::Tensor X, torch::Tensor thetas, torch::Tensor U, torch::Tensor G);
+torch::Tensor rotMatBackwardCuda( torch::Tensor thetas, torch::Tensor U, torch::Tensor G);
 
 // Macros to check inputs
 #define CHECK_CUDA(x) TORCH_CHECK(x.type().is_cuda(), #x " must be a CUDA tensor")
@@ -20,13 +20,12 @@ torch::Tensor rotMatForward(torch::Tensor U, torch::Tensor thetas, int N)
   return rotMatForwardCuda(U, thetas, N);
 }
 
-torch::Tensor rotMatBackward( torch::Tensor X, torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
+torch::Tensor rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
 {
-  CHECK_INPUT(X);
   CHECK_INPUT(thetas);
   CHECK_INPUT(U);
   CHECK_INPUT(G);
-  return rotMatBackwardCuda(X, thetas, U, G);
+  return rotMatBackwardCuda(thetas, U, G);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

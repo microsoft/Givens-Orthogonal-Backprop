@@ -11,7 +11,8 @@
 
 using namespace torch::indexing;
 
-#define ThreadsPerRowForward 128
+#define WarpSize 32
+#define ThreadsPerRowForward WarpSize
 #define ThreadsPerRowBackward 256
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
@@ -181,7 +182,7 @@ template <typename scalar_t>
 
   // Set A, skip a write if possible can
   sA[tid] = newMik * newUfTjk - newMjk * newUfTik;
-  /*__syncthreads();
+  __syncthreads();
 
   // Reduce
   if (ThreadsPerRowBackward == 1024) {
@@ -192,10 +193,9 @@ template <typename scalar_t>
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
   if (ThreadsPerRowBackward >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if(tid <32) warpReduceAtBackward(sA,tid);*/
+  if(tid < WarpSize) warpReduceAtBackward(sA,tid);
   
-  //if (tid == 0) 
-  atomicAdd(&JVP[thetaIndex], sA[tid]);
+  if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
 
 std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int N)
@@ -262,7 +262,6 @@ torch::Tensor rotMatForwardCuda(torch::Tensor Uorg, torch::Tensor thetas, int N)
 }
 
 torch::Tensor rotMatBackwardCuda(
-  torch::Tensor X,
   torch::Tensor thetas,
   torch::Tensor U,
   torch::Tensor G)
@@ -280,10 +279,10 @@ torch::Tensor rotMatBackwardCuda(
 
   //auto M = torch::eye(N,N, tensOptions);
   //M.index_put_({Slice(0, G.size(1)), Slice()}, G.detach().t());
-  auto M = G.t().contiguous().detach();
-  M = torch::matmul(U, M);
+  auto M = U; //G.t().contiguous().detach();
+  //M = torch::matmul(U, M);
 
-  auto UfTrans = torch::eye(N,N, tensOptions);
+  auto UfTrans = G.contiguous();// torch::eye(N,N, tensOptions);
   //UfTrans.index_put_({Slice(0, U.size(1)), Slice()}, U.detach().t());
   
   ///auto UfTrans = torch::clone(U);// .t().contiguous().detach();

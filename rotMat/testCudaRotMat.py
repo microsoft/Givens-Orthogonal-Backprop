@@ -10,19 +10,20 @@ import time
 device = torch.device('cuda')
 dtype = torch.float32
 
-N = 2000
+N = 512
 M = N
 K = N-M
 nThetas = int(N*(N-1)/2)
+batch_size = 32
 
 # To drop angle params we need to have at least the last *pair* of dimensions left out
 if K > 1:
     nThetas -= int(K*(K-1)/2)
 print("nThetas=" +str(nThetas) )
 
-G = torch.randn(N,N,requires_grad=True).to(dtype).to(device)
+X = torch.randn(N,batch_size).to(dtype).to(device)
+G = torch.randn(X.size(0), X.size(1),requires_grad=True).to(dtype).to(device)
 thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
-X = torch.eye(N,M).to(dtype).to(device)
 
 
 # You *cannot* use time.time() to time cuda-enabled functions! The cpu
