@@ -278,10 +278,10 @@ torch::Tensor rotMatBackwardCuda(
     .dtype(thetas.dtype())
     .device(thetas.device());
 
-  auto M = torch::eye(N,N, tensOptions);
-  M.index_put_({Slice(0, G.size(1)), Slice()}, G.detach().t());
+  //auto M = torch::eye(N,N, tensOptions);
+  //M.index_put_({Slice(0, G.size(1)), Slice()}, G.detach().t());
+  auto M = G.t().contiguous().detach();
   M = torch::matmul(U, M);
-  //auto M = torch::clone(G);//.t().contiguous().detach();
 
   auto UfTrans = torch::eye(N,N, tensOptions);
   //UfTrans.index_put_({Slice(0, U.size(1)), Slice()}, U.detach().t());
