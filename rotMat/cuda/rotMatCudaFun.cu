@@ -67,7 +67,7 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
 }
 
  template <typename scalar_t>  
-  __global__ void ApplyRoundRobinGivensRotationMatrix(
+  __global__ void ApplyGivensTheta(
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> U,
@@ -121,7 +121,7 @@ __device__ void warpReduceAtBackward(
 }
 
 template <typename scalar_t> 
-  __global__ void setJVP(
+  __global__ void CalculateAndReduceGivensThetaJVP(
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> M,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UfTrans,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
@@ -250,7 +250,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
       thetas.type(),
       "rotMatForwardCuda",
       ([&]{
-        ApplyRoundRobinGivensRotationMatrix<scalar_t><<<blocks,threads>>>(
+        ApplyGivensTheta<scalar_t><<<blocks,threads>>>(
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
@@ -258,15 +258,15 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
       }));
   }
 
-  return U;
+  return X;
 }
 
-std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
+torch::Tensor rotMatBackwardCuda(
   torch::Tensor thetas,
-  torch::Tensor U,
+  torch::Tensor UX,
   torch::Tensor G)
 {
-  auto N = U.size(0);
+  auto N = UX.size(0);
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
   auto deadIndex = std::get<1>(rotMatConstants);
@@ -306,8 +306,8 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
       thetas.type(),
       "rotMatBackwardCuda",
       ([&]{
-        setJVP<scalar_t><<<blocks,threads>>>(
-          U.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
+        CalculateAndReduceGivensThetaJVP<scalar_t><<<blocks,threads>>>(
+          UX.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
@@ -316,5 +316,5 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
       }));
   }
   
-  return std::make_pair(G, JVP);
+  return JVP;
 }

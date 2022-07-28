@@ -3,20 +3,20 @@
 
 import torch
 import rotMatcuda
-import math
+import numpy as np
 
 class RotMatFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, thetas):
-        ux = rotMatcuda.forward(x, thetas)
+        ux = rotMatcuda.forward(torch.clone(x), thetas)
         ctx.save_for_backward(thetas, ux)
         return  ux
 
     @staticmethod
     def backward(ctx, lossGrad):
         thetas, ux = ctx.saved_tensors
-        xGrad, thetaGrad = rotMatcuda.backward(thetas, torch.clone(ux), torch.clone(lossGrad.contiguous()))
-        return xGrad, thetaGrad
+        thetaGrad = rotMatcuda.backward(thetas, torch.clone(ux).detach(), lossGrad.contiguous().detach())
+        return lossGrad, thetaGrad
 
 
 class RotMat(torch.nn.Module):
@@ -29,7 +29,7 @@ class RotMat(torch.nn.Module):
 
         K = N-M
         nThetas = int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
-        self.thetas = torch.nn.Parameter( torch.zeros(nThetas) )
+        self.thetas = torch.nn.Parameter( torch.ones(nThetas) * np.pi * 2 )
 
         self.N = N
         self.M = M
