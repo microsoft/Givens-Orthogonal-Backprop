@@ -26,10 +26,10 @@ class RotMat(torch.nn.Module):
         M = N if M is None else M
         if M > N:
             raise Exception("M must be <= N")
-
+        
         K = N-M
         nThetas = int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
-        self.thetas = torch.nn.Parameter( torch.ones(nThetas) * np.pi * 2 )
+        self.thetas = torch.nn.Parameter(torch.zeros(nThetas))
 
         self.N = N
         self.M = M
