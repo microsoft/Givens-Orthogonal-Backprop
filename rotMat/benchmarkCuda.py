@@ -45,7 +45,6 @@ for i,N in enumerate(Ns):
     #G = torch.randn(N,N,requires_grad=True).to(dtype).to(device)
 
     for t in range(nTrials+1):
-        torch.cuda.synchronize()
         thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
         X = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
         G = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
@@ -73,10 +72,10 @@ for i,N in enumerate(Ns):
         endFwd.record()
 
         forwardMilliseconds[i] += startFwd.elapsed_time(endFwd)
-        
-    forwardMilliseconds[i] /= nTrials
-    print('On N={0:d}; time in ms: {1:.10f} '.format(N, startFwd.elapsed_time(endFwd)/1000) ) # milliseconds
+    
     torch.cuda.synchronize()
+    forwardMilliseconds[i] /= nTrials
+    print('On N={0:d}; With bs {1:d}  time in ms: {2:.10f} '.format(N, bs, startFwd.elapsed_time(endFwd)/1000) ) # milliseconds
     
 profiler.stop()
 
