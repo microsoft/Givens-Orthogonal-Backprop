@@ -6,7 +6,7 @@
 
 // Declarations to cuda-enabled functions
 torch::Tensor rotMatForwardCuda( torch::Tensor X, torch::Tensor thetas);
-torch::Tensor rotMatBackwardCuda(torch::Tensor thetas, torch::Tensor U, torch::Tensor G);
+std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(torch::Tensor thetas, torch::Tensor U, torch::Tensor G);
 
 // Macros to check inputs
 #define CHECK_CUDA(x) TORCH_CHECK(x.type().is_cuda(), #x " must be a CUDA tensor")
@@ -20,7 +20,7 @@ torch::Tensor rotMatForward(torch::Tensor X, torch::Tensor thetas)
   return rotMatForwardCuda(X, thetas);
 }
 
-torch::Tensor rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
+std::pair<torch::Tensor, torch::Tensor> rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
 {
   CHECK_INPUT(thetas);
   CHECK_INPUT(U);

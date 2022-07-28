@@ -6,18 +6,21 @@ import rotMatcuda
 import numpy as np
 
 class RotMatFunction(torch.autograd.Function):
+    '''
+        If the inputs are expected to be re-used, all cloning must be done here!
+    '''
+    
     @staticmethod
     def forward(ctx, x, thetas):
-        ux = rotMatcuda.forward(torch.clone(x), thetas)
+        ux = rotMatcuda.forward(torch.clone(x.detach()), thetas.detach())
         ctx.save_for_backward(thetas, ux)
         return  ux
 
     @staticmethod
     def backward(ctx, lossGrad):
         thetas, ux = ctx.saved_tensors
-        thetaGrad = rotMatcuda.backward(thetas, torch.clone(ux).detach(), lossGrad.contiguous())
+        thetaGrad = rotMatcuda.backward(thetas.detach(), torch.clone(ux).detach(), lossGrad.detach().contiguous())
         return lossGrad, thetaGrad
-
 
 class RotMat(torch.nn.Module):
     def __init__(self, N, M=None):

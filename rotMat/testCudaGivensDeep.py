@@ -26,11 +26,11 @@ for XisId in [True, False]:
                 G = torch.randn(N,batch).to(dtype).to(device)
 
                 if XisId:
-                    X = torch.eye(N, batch).to(dtype).to(device).requires_grad_(True)
+                    X = torch.autograd.Variable(torch.eye(N, batch).to(dtype).to(device), requires_grad=True)
                 else:
-                    X = torch.randn(N, batch).to(dtype).to(device).requires_grad_(True)
+                    X = torch.autograd.Variable(torch.randn(N, batch).to(dtype).to(device), requires_grad=True)
                 
-                XExplicit = torch.nn.Parameter(torch.clone(X).requires_grad_(True))
+                XExplicit = torch.autograd.Variable(torch.clone(X), requires_grad=True)
                 GExplicit = torch.clone(G)
 
                 # START WITH IMPLICIT U CALCULATION

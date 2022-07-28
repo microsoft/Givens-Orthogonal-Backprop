@@ -56,7 +56,7 @@ for i,N in enumerate(Ns):
         # The elapsed_time function returns time in *milliseconds*
         if t == 0:
             # warm up
-            U = rotMatFn.forward(X,thetas,N)
+            U = rotMatFn.forward(X,thetas)
             torch.cuda.synchronize()
             JVP = rotMatFn.backward(thetas,U,G)
             torch.cuda.synchronize()
@@ -66,7 +66,7 @@ for i,N in enumerate(Ns):
         endFwd = torch.cuda.Event(enable_timing=True)
         
         startFwd.record()
-        U = rotMatFn.forward(X,thetas,N)
+        U = rotMatFn.forward(X,thetas)
         torch.cuda.synchronize()
         JVP = rotMatFn.backward(thetas,U,G)
         torch.cuda.synchronize()
@@ -76,7 +76,8 @@ for i,N in enumerate(Ns):
         
     forwardMilliseconds[i] /= nTrials
     print('On N={0:d}; time in ms: {1:.10f} '.format(N, startFwd.elapsed_time(endFwd)/1000) ) # milliseconds
-
+    torch.cuda.synchronize()
+    
 profiler.stop()
 
 #forwardMilliseconds /= nTrials

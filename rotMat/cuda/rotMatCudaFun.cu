@@ -186,7 +186,7 @@ template <typename scalar_t>
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
   if (ThreadsPerRowBackward >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if(tid < WarpSize) warpReduceAtBackward(sA, tid);
+  if(tid < 32) warpReduceAtBackward(sA, tid);
   
   if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
@@ -245,7 +245,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
   return X;
 }
 
-torch::Tensor rotMatBackwardCuda(
+std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor thetas,
   torch::Tensor UX,
   torch::Tensor G)
@@ -258,7 +258,7 @@ torch::Tensor rotMatBackwardCuda(
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
-  
+
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
@@ -284,5 +284,5 @@ torch::Tensor rotMatBackwardCuda(
       }));
   }
   
-  return JVP;
+  return std::make_pair(G, JVP);
 }
