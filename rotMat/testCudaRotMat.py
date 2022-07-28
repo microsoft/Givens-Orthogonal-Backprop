@@ -10,7 +10,7 @@ import time
 device = torch.device('cuda')
 dtype = torch.float32
 
-N = 512
+N = 2000
 M = N
 K = N-M
 nThetas = int(N*(N-1)/2)
@@ -34,7 +34,7 @@ thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
 startFwd = torch.cuda.Event(enable_timing=True)
 endFwd = torch.cuda.Event(enable_timing=True)
 startFwd.record()
-U = rotMatFn.forward(X,thetas,N)
+U = rotMatFn.forward(X,thetas)
 endFwd.record()
 torch.cuda.synchronize()
 # Waits for everything to finish running

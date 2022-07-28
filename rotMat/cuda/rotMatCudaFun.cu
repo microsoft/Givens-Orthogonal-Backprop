@@ -13,7 +13,7 @@ using namespace torch::indexing;
 
 #define WarpSize 32
 #define ThreadsPerRowForward WarpSize
-#define ThreadsPerRowBackward 256
+#define ThreadsPerRowBackward WarpSize
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
 // https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error
@@ -32,6 +32,19 @@ __device__ double atomicAdd(
   return __longlong_as_double(old);
 }
 #endif
+
+template <typename scalar_t>
+  __device__ void warpReduceAtBackward(
+    volatile scalar_t* sdata, 
+    int tid)
+{
+  if (ThreadsPerRowBackward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (ThreadsPerRowBackward >= 32) sdata[tid] += sdata[tid + 16];
+  if (ThreadsPerRowBackward >= 16) sdata[tid] += sdata[tid + 8];
+  if (ThreadsPerRowBackward >= 8) sdata[tid] += sdata[tid + 4];
+  if (ThreadsPerRowBackward >= 4) sdata[tid] += sdata[tid + 2];
+  if (ThreadsPerRowBackward >= 2) sdata[tid] += sdata[tid + 1];
+}
 
 __device__ __forceinline__ std::pair<const int, const int> determineRowIndexPair(
   const int blockIndex,
@@ -67,7 +80,7 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
 }
 
  template <typename scalar_t>  
-  __global__ void ApplyGivensTheta(
+  __global__ void ApplyRoundRobinGivensRotationMatrix(
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> U,
@@ -76,12 +89,8 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
     const int dMax,
     const int tournamentStep)
 {
-  // If transpose k works on rows; otherwise on columns
   const int k = threadIdx.y + blockDim.y*blockIdx.y;
-  
-  const int N = U.size(0);
-  const int M = U.size(1);
-  if (k >= M)
+  if (k >= U.size(1))
   {
     return;
   }
@@ -89,17 +98,17 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
   auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
   const int i = rowIndices.first;
   const int j = rowIndices.second;
-
   if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
   {
     return;
   }
 
+  const int N = U.size(0);
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
   const scalar_t cij = C[thetaIndex];
   const scalar_t sij = S[thetaIndex];
 
-  // Apply Givens: Update U's offsets
+  // Apply Givens
   const scalar_t Ui = U[i][k];
   const scalar_t Uj = U[j][k];
 
@@ -107,21 +116,8 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
   U[j][k] = Ui*sij + Uj*cij;
 }
 
-template <typename scalar_t>
-__device__ void warpReduceAtBackward(
-  volatile scalar_t* sdata, 
-  int tid)
-{
-  if (ThreadsPerRowBackward >= 64)  sdata[tid] += sdata[tid + 32];
-  if (ThreadsPerRowBackward >= 32) sdata[tid] += sdata[tid + 16];
-  if (ThreadsPerRowBackward >= 16) sdata[tid] += sdata[tid + 8];
-  if (ThreadsPerRowBackward >= 8) sdata[tid] += sdata[tid + 4];
-  if (ThreadsPerRowBackward >= 4) sdata[tid] += sdata[tid + 2];
-  if (ThreadsPerRowBackward >= 2) sdata[tid] += sdata[tid + 1];
-}
-
 template <typename scalar_t> 
-  __global__ void CalculateAndReduceGivensThetaJVP(
+  __global__ void CalculateRoundRobinGivensThetaJVPs(
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> M,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UfTrans,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
@@ -137,8 +133,6 @@ template <typename scalar_t>
   // k is the column index of M and the row index of Uf, to set col of A
   const int tid = threadIdx.y;
   const int k = tid + blockDim.y*blockIdx.y;
-  
-  const int N = UfTrans.size(0);
   if (k >= UfTrans.size(1))
   {
     sA[tid] = 0;
@@ -148,7 +142,6 @@ template <typename scalar_t>
   auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
   int i = rowIndices.first;
   int j = rowIndices.second;
-
   if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
   {
     sA[tid] = 0;
@@ -156,11 +149,13 @@ template <typename scalar_t>
   }
 
    __syncthreads();
+  const int N = UfTrans.size(0);
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
   const scalar_t cij = C[thetaIndex];
+  // Transpose of a Givens rotation has the signs of sij flipped
   const scalar_t sij = -1 * S[thetaIndex];
 
-  // Apply Givens: Update U's offsets
+  // Apply Givens Transpose
   const scalar_t Ui = UfTrans[i][k];
   const scalar_t Uj = UfTrans[j][k];
 
@@ -180,7 +175,6 @@ template <typename scalar_t>
   const scalar_t newMjk = Mi*sij + Mj*cij;
   M[j][k] = newMjk;
 
-  // Set A, skip a write if possible can
   sA[tid] = newMik * newUfTjk - newMjk * newUfTik;
   __syncthreads();
 
@@ -200,8 +194,7 @@ template <typename scalar_t>
 
 std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int N)
 {
-  // if nThetas == maxPairs
-  auto dMax = N-1;
+  auto dMax = N-1; // If nThetas == maxPairs
   if (nThetas < N*(N-1)/2)
   {
     dMax -= 1 + int(sqrt(1 - 4*(2*nThetas - N*(N-1)))) / 2;
@@ -227,19 +220,11 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
   auto deadIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  // Set U same device and type as thetas
-  auto tensOptions = torch::TensorOptions()
-    .dtype(thetas.dtype())
-    .device(thetas.device());
-
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
-  // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
   const int nBlocksY = X.size(1)/ThreadsPerRowForward + (X.size(1)% ThreadsPerRowForward != 0);
-  const int nBlocksX = Ntilde / 2;
-
-  const dim3 blocks(nBlocksX, nBlocksY);
+  const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowForward);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
@@ -250,7 +235,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
       thetas.type(),
       "rotMatForwardCuda",
       ([&]{
-        ApplyGivensTheta<scalar_t><<<blocks,threads>>>(
+        ApplyRoundRobinGivensRotationMatrix<scalar_t><<<blocks,threads>>>(
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
@@ -272,30 +257,14 @@ torch::Tensor rotMatBackwardCuda(
   auto deadIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  // In rotMatForwardCuda, U is given these same properties
-  auto tensOptions = torch::TensorOptions()
-    .dtype(thetas.dtype())
-    .device(thetas.device());
-
-  //auto M = torch::eye(N,N, tensOptions);
-  //M.index_put_({Slice(0, G.size(1)), Slice()}, G.detach().t());
-   
-  //auto M = torch::clone(U);
-  //G.t().contiguous().detach();
-  //M = torch::matmul(U, M);
-
-  // This will be the gradient with respect to X, which we can return from this function!
-  //auto UfTrans = G.contiguous();
-
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
-  auto JVP = torch::zeros_like(thetas, tensOptions);
+  
+  auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
+  auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
-  const int nBlocksX = Ntilde / 2;
   const int nBlocksY = N/ThreadsPerRowBackward + (N % ThreadsPerRowBackward != 0);
-
-  const dim3 blocks(nBlocksX, nBlocksY);
+  const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowBackward);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
@@ -306,7 +275,7 @@ torch::Tensor rotMatBackwardCuda(
       thetas.type(),
       "rotMatBackwardCuda",
       ([&]{
-        CalculateAndReduceGivensThetaJVP<scalar_t><<<blocks,threads>>>(
+        CalculateRoundRobinGivensThetaJVPs<scalar_t><<<blocks,threads>>>(
           UX.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
