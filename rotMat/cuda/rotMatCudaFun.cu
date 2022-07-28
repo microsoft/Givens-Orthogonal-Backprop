@@ -12,8 +12,8 @@
 using namespace torch::indexing;
 
 #define WarpSize 32
-#define ThreadsPerRowForward WarpSize
-#define ThreadsPerRowBackward WarpSize
+#define ThreadsPerRowForward 128
+#define ThreadsPerRowBackward 256
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
 // https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error

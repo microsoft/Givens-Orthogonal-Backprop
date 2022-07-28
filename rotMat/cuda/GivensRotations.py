@@ -19,7 +19,7 @@ class RotMatFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, lossGrad):
         thetas, ux = ctx.saved_tensors
-        thetaGrad = rotMatcuda.backward(thetas.detach(), torch.clone(ux).detach(), lossGrad.detach().contiguous())
+        lossGrad, thetaGrad = rotMatcuda.backward(thetas.detach(), torch.clone(ux).detach(), lossGrad.detach().contiguous())
         return lossGrad, thetaGrad
 
 class RotMat(torch.nn.Module):
