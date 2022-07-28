@@ -4,6 +4,7 @@
 import torch
 import cuda.GivensRotations as GivensRotations
 import time
+import numpy as np
 
 # This script is not meant as a rigorous benchmark; only to verify correctness against naive autodiff
 
@@ -20,6 +21,7 @@ M = 15
 K = N-M
 
 rotUnit = GivensRotations.RotMat(N, N).to(device)
+torch.nn.init.uniform_(rotUnit.thetas, 0, 4*np.pi )
 
 batch = 3
 # Loss grad when the loss is weighted sum of the els of U
@@ -137,3 +139,4 @@ if dispResults:
     print(torch.absolute(Ucustom-UPyTorch).max())
     print("Max abs deviation of grads: ")
     print(torch.absolute(thetas.grad-gradCustom).max())
+    #print(torch.isclose(thetas.grad, gradCustom))

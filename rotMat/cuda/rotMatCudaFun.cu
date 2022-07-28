@@ -67,7 +67,7 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
 }
 
  template <typename scalar_t>  
-  __global__ void updateGivensElements(
+  __global__ void ApplyRoundRobinGivensRotationMatrix(
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> U,
@@ -219,8 +219,9 @@ std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int 
   return std::make_tuple(dMax, deadIndex, Ntilde);
 }
 
-torch::Tensor rotMatForwardCuda(torch::Tensor Uorg, torch::Tensor thetas, int N)
+torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
 {
+  const int N = X.size(0);
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
   auto deadIndex = std::get<1>(rotMatConstants);
@@ -231,12 +232,11 @@ torch::Tensor rotMatForwardCuda(torch::Tensor Uorg, torch::Tensor thetas, int N)
     .dtype(thetas.dtype())
     .device(thetas.device());
 
-  auto U = torch::clone(Uorg).detach();
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
   // CUDA grid: blocks of size: Ntilde/2 x ceil(N/nThreads)
-  const int nBlocksY = U.size(1)/ThreadsPerRowForward + (U.size(1)% ThreadsPerRowForward != 0);
+  const int nBlocksY = X.size(1)/ThreadsPerRowForward + (X.size(1)% ThreadsPerRowForward != 0);
   const int nBlocksX = Ntilde / 2;
 
   const dim3 blocks(nBlocksX, nBlocksY);
@@ -250,10 +250,10 @@ torch::Tensor rotMatForwardCuda(torch::Tensor Uorg, torch::Tensor thetas, int N)
       thetas.type(),
       "rotMatForwardCuda",
       ([&]{
-        updateGivensElements<scalar_t><<<blocks,threads>>>(
+        ApplyRoundRobinGivensRotationMatrix<scalar_t><<<blocks,threads>>>(
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
-          U.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
+          X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           deadIndex,Ntilde, dMax, tournamentStep);
       }));
   }
@@ -261,7 +261,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor Uorg, torch::Tensor thetas, int N)
   return U;
 }
 
-torch::Tensor rotMatBackwardCuda(
+std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor thetas,
   torch::Tensor U,
   torch::Tensor G)
@@ -279,13 +279,13 @@ torch::Tensor rotMatBackwardCuda(
 
   //auto M = torch::eye(N,N, tensOptions);
   //M.index_put_({Slice(0, G.size(1)), Slice()}, G.detach().t());
-  auto M = U; //G.t().contiguous().detach();
+   
+  //auto M = torch::clone(U);
+  //G.t().contiguous().detach();
   //M = torch::matmul(U, M);
 
-  auto UfTrans = G.contiguous();// torch::eye(N,N, tensOptions);
-  //UfTrans.index_put_({Slice(0, U.size(1)), Slice()}, U.detach().t());
-  
-  ///auto UfTrans = torch::clone(U);// .t().contiguous().detach();
+  // This will be the gradient with respect to X, which we can return from this function!
+  //auto UfTrans = G.contiguous();
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
@@ -307,8 +307,8 @@ torch::Tensor rotMatBackwardCuda(
       "rotMatBackwardCuda",
       ([&]{
         setJVP<scalar_t><<<blocks,threads>>>(
-          M.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
-          UfTrans.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
+          U.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
+          G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           JVP.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
@@ -316,5 +316,5 @@ torch::Tensor rotMatBackwardCuda(
       }));
   }
   
-  return JVP;
+  return std::make_pair(G, JVP);
 }

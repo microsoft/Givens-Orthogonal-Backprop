@@ -5,22 +5,22 @@
 #include <vector>
 
 // Declarations to cuda-enabled functions
-torch::Tensor rotMatForwardCuda( torch::Tensor U, torch::Tensor thetas, int N);
-torch::Tensor rotMatBackwardCuda( torch::Tensor thetas, torch::Tensor U, torch::Tensor G);
+torch::Tensor rotMatForwardCuda( torch::Tensor X, torch::Tensor thetas);
+std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(torch::Tensor thetas, torch::Tensor U, torch::Tensor G);
 
 // Macros to check inputs
 #define CHECK_CUDA(x) TORCH_CHECK(x.type().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-torch::Tensor rotMatForward(torch::Tensor U, torch::Tensor thetas, int N)
+torch::Tensor rotMatForward(torch::Tensor X, torch::Tensor thetas)
 {
   CHECK_INPUT(thetas);
-  CHECK_INPUT(U);
-  return rotMatForwardCuda(U, thetas, N);
+  CHECK_INPUT(X);
+  return rotMatForwardCuda(X, thetas);
 }
 
-torch::Tensor rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
+std::pair<torch::Tensor, torch::Tensor> rotMatBackward( torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
 {
   CHECK_INPUT(thetas);
   CHECK_INPUT(U);
