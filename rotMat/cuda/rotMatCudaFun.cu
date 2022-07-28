@@ -118,8 +118,8 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
 
 template <typename scalar_t> 
   __global__ void CalculateRoundRobinGivensThetaJVPs(
-    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> M,
-    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UfTrans,
+    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
+    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> JVP,
@@ -133,7 +133,7 @@ template <typename scalar_t>
   // k is the column index of M and the row index of Uf, to set col of A
   const int tid = threadIdx.y;
   const int k = tid + blockDim.y*blockIdx.y;
-  if (k >= UfTrans.size(1))
+  if (k >= UX.size(1))
   {
     sA[tid] = 0;
     return;
@@ -149,33 +149,32 @@ template <typename scalar_t>
   }
 
    __syncthreads();
-  const int N = UfTrans.size(0);
+  const int N = UX.size(0);
   const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
   const scalar_t cij = C[thetaIndex];
-  // Transpose of a Givens rotation has the signs of sij flipped
-  const scalar_t sij = -1 * S[thetaIndex];
+  const scalar_t sij = -1 * S[thetaIndex]; // Transpose of a Givens rotation has the signs of sij flipped
 
-  // Apply Givens Transpose
-  const scalar_t Ui = UfTrans[i][k];
-  const scalar_t Uj = UfTrans[j][k];
+  // Apply Givens Transpose to G
+  const scalar_t Gi = G[i][k];
+  const scalar_t Gj = G[j][k];
 
-  const scalar_t newUfTik = Ui*cij - Uj*sij;
-  UfTrans[i][k] = newUfTik;
+  const scalar_t newGi = Gi*cij - Gj*sij;
+  G[i][k] = newGi;
 
-  const scalar_t newUfTjk = Ui*sij + Uj*cij;
-  UfTrans[j][k] = newUfTjk;
+  const scalar_t newGj = Gi*sij + Gj*cij;
+  G[j][k] = newGj;
 
-  // Repeat for M
-  const scalar_t Mi = M[i][k];
-  const scalar_t Mj = M[j][k];
+  // Repeat for UX
+  const scalar_t UXi = UX[i][k];
+  const scalar_t UXj = UX[j][k];
 
-  const scalar_t newMik = Mi*cij - Mj*sij;
-  M[i][k] = newMik;
+  const scalar_t newUXi = UXi*cij - UXj*sij;
+  UX[i][k] = newUXi;
 
-  const scalar_t newMjk = Mi*sij + Mj*cij;
-  M[j][k] = newMjk;
+  const scalar_t newUXj = UXi*sij + UXj*cij;
+  UX[j][k] = newUXj;
 
-  sA[tid] = newMik * newUfTjk - newMjk * newUfTik;
+  sA[tid] = newUXi * newGj - newUXj * newGi;
   __syncthreads();
 
   // Reduce
@@ -187,7 +186,7 @@ template <typename scalar_t>
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
   if (ThreadsPerRowBackward >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if(tid < WarpSize) warpReduceAtBackward(sA,tid);
+  if(tid < WarpSize) warpReduceAtBackward(sA, tid);
   
   if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
