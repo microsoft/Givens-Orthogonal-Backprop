@@ -15,7 +15,7 @@ class RotMatFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, lossGrad):
         thetas, ux = ctx.saved_tensors
-        thetaGrad = rotMatcuda.backward(thetas, torch.clone(ux).detach(), lossGrad.contiguous().detach())
+        thetaGrad = rotMatcuda.backward(thetas, torch.clone(ux).detach(), lossGrad.contiguous())
         return lossGrad, thetaGrad
 
 
@@ -38,17 +38,14 @@ class RotMat(torch.nn.Module):
     def forward(self, X):
         return RotMatFunction.apply(X, self.thetas)
 
-    def explicit_forward(self, X):
-        return getU() @ X
-
     def getU(self, forward_pass=True):
         if not forward_pass:
             if not self.U:
-                identity = torch.eye(self.N, self.M).to(self.thetas.get_device()).to(self.thetas.dtype)
+                identity = torch.eye(self.N, self.N).to(self.thetas.get_device()).to(self.thetas.dtype)
                 self.U = RotMatFunction.apply(identity, self.thetas)
             return self.U
 
-        identity = torch.eye(self.N, self.M).to(self.thetas.get_device()).to(self.thetas.dtype)
+        identity = torch.eye(self.N, self.N).to(self.thetas.get_device()).to(self.thetas.dtype)
         return RotMatFunction.apply(identity, self.thetas)
 
 

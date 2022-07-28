@@ -106,7 +106,7 @@ for XisId in [True, False]:
                         GivMat[j,j] = cij
                         GivMat[i,j] = -sij
                         GivMat[j,i] = sij
-                        UPyTorch = GivMat.mm(UPyTorch)
+                        UPyTorch = GivMat.matmul(UPyTorch)
 
                 G = G.to(torch.device('cpu'))
                 loss = (G*UPyTorch).sum()
@@ -120,7 +120,6 @@ for XisId in [True, False]:
                     print(UPyTorch)
                     print("thetaGrad:")
                     print(thetas.grad)
-                    # print(E)
 
                 if dispResults:
                     print("\n\nComparison of custom and autodiff:\n---------------------------------")
