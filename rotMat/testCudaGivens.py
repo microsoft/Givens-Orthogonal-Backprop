@@ -6,14 +6,15 @@ import cuda.GivensRotations as GivensRotations
 import time
 import numpy as np
 
-# This script is not meant as a rigorous benchmark; only to verify correctness against naive autodiff
+# This script is not meant as a rigorous benchmark;
+# only to verify correctness against naive autodiff
 
 device = torch.device('cuda')
 dtype = torch.float32
 
 # To have same results
 torch.manual_seed(10)
-dispResults = False
+dispResults = True
 
 parameters = [
     [15, 15, 15],
@@ -27,7 +28,8 @@ parameters = [
     [33, 15, 32],
     [33, 5, 15],
     [33, 5, 3],
-    [33, 5, 32]
+    [33, 5, 32],
+    [33, 5, 33]
     ]
 parameters = [[x] + param for x in [True,False] for param in parameters]
 
@@ -39,12 +41,11 @@ for XisId, N, M, batch in parameters:
     thetas = rotUnit.thetas.detach().to(torch.device('cpu')).requires_grad_(True)
 
     G = torch.randn(N,batch).to(dtype).to(device)
-
     if XisId:
         X = torch.eye(N, batch).to(dtype).to(device)
-    else:
+    if not XisId:
         X = torch.randn(N, batch).to(dtype).to(device)
-    
+
     UPyTorch = torch.clone(X).to('cpu')
 
     startFwd = torch.cuda.Event(enable_timing=True)
@@ -52,21 +53,16 @@ for XisId, N, M, batch in parameters:
     startFwd.record()
     Ucustom = rotUnit.forward(X)
     endFwd.record()
-    # Waits for everything to finish running
     torch.cuda.synchronize()
 
-    #print(G.size(), Ucustom.size())
     loss = torch.sum(G*Ucustom)
-
     startBck = torch.cuda.Event(enable_timing=True)
     endBck = torch.cuda.Event(enable_timing=True)
     startBck.record()
     loss.backward()
     endBck.record()
-    # Waits for everything to finish running
     torch.cuda.synchronize()
 
-    # Milliseconds
     forwardMilliseconds = startFwd.elapsed_time(endFwd)
     backwardMilliseconds = startBck.elapsed_time(endBck)
     if dispResults:
@@ -75,17 +71,11 @@ for XisId, N, M, batch in parameters:
     Ucustom = Ucustom.to(torch.device('cpu'))
 
     if dispResults:
-        print("Custom result:")
-        print("U:")
-        print(Ucustom)
-        print("thetaGrad:")
-        print(gradCustom)
+        print("Custom result:\nU:\n", Ucustom, "\nthetaGrad:\n", gradCustom)
 
-    # (i,j) with indices larger than dMax are left out
     dMax = N-1
     if M < N-1:
         dMax -= K
-
     Ntilde = N
     deadNode = -1
     if N%2 == 1:
@@ -96,7 +86,6 @@ for XisId, N, M, batch in parameters:
     E = list()
     for step in range(Ntilde-2,-1,-1):
         for blockIndx in range(int(Ntilde/2)):
-
             if blockIndx == 0:
                 i = 0
             else:
@@ -125,22 +114,13 @@ for XisId, N, M, batch in parameters:
     G = G.to(torch.device('cpu'))
     loss = (G*UPyTorch).sum()
     loss.backward()
+
     if dispResults:
         print(" (in seconds) torch time: "+str(time.time()-tstart))
-
-    if dispResults:
-        print("Torch autodiff result:")
-        print("U:")
-        print(UPyTorch)
-        print("thetaGrad:")
-        print(thetas.grad)
-
-    if dispResults:
-        print("\n\nComparison of custom and autodiff:\n---------------------------------")
-        print("Max abs deviation of forwards: ")
-        print(torch.absolute(Ucustom-UPyTorch).max())
-        print("Max abs deviation of grads: ")
-        print(torch.absolute(thetas.grad-gradCustom).max())
+        print("Torch autodiff result:\nU:\n", UPyTorch, "thetaGrad:\n", thetas.grad)
+        print("\n\nComparison of custom and autodiff:\n---------------------------------\n")
+        print("Max abs deviation of forwards:\n", torch.absolute(Ucustom-UPyTorch).max())
+        print("Max abs deviation of grads: \n", torch.absolute(thetas.grad-gradCustom).max())
 
     msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId)
     torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
