@@ -73,7 +73,7 @@ for i,N in enumerate(Ns):
 
         forwardMilliseconds[i] += startFwd.elapsed_time(endFwd)
         torch.cuda.synchronize()
-        
+
     forwardMilliseconds[i] /= nTrials
     print('On N={0:d}; With bs {1:d}  time in ms: {2:.10f} '.format(N, bs, startFwd.elapsed_time(endFwd)/1000) ) # milliseconds
     
