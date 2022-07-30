@@ -10,11 +10,11 @@ import time
 device = torch.device('cuda')
 dtype = torch.float32
 
-N = 2000
+N = 2048
 M = N
 K = N-M
 nThetas = int(N*(N-1)/2)
-batch_size = 32
+batch_size =  64
 
 # To drop angle params we need to have at least the last *pair* of dimensions left out
 if K > 1:
@@ -34,9 +34,8 @@ thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
 startFwd = torch.cuda.Event(enable_timing=True)
 endFwd = torch.cuda.Event(enable_timing=True)
 startFwd.record()
-U = rotMatFn.forward(X,thetas)
+U = rotMatFn.forwardTeamRR(X,thetas)
 endFwd.record()
-torch.cuda.synchronize()
 # Waits for everything to finish running
 torch.cuda.synchronize()
 
