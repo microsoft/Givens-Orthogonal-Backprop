@@ -3,61 +3,52 @@
 
 import torch
 import rotMatcuda
-import math
+import numpy as np
 
 class RotMatFunction(torch.autograd.Function):
+    '''
+        If the inputs are expected to be re-used, all cloning must be done here!
+    '''
+    
     @staticmethod
-    def forward(ctx, thetas, N, nCols):
-
-        U = rotMatcuda.forward(thetas, N)
-        ctx.save_for_backward(thetas, U)
-
-        if N == nCols:
-            return U
-        return U[:,0:nCols]
+    def forward(ctx, x, thetas):
+        ux = rotMatcuda.forward(torch.clone(x.detach()), thetas.detach())
+        ctx.save_for_backward(thetas, ux)
+        return  ux
 
     @staticmethod
     def backward(ctx, lossGrad):
-
-        thetas, U = ctx.saved_tensors
-        # Force the grad wrt outputs to be contiguous
-        thetaGrad = rotMatcuda.backward( thetas, U, lossGrad.contiguous())
-
-        # "forward" took 3 inputs but we don't want the grad wrt N or nCols!
-        return thetaGrad, None, None, None
-
+        thetas, ux = ctx.saved_tensors
+        lossGrad, thetaGrad = rotMatcuda.backward(thetas.detach(), torch.clone(ux).detach(), lossGrad.detach().contiguous())
+        return lossGrad, thetaGrad
 
 class RotMat(torch.nn.Module):
-
-    # Note that RotMat doesn't take any "inputs"; its behavior is
-    # given solely by thetas.
-
-    # If N is 1, simply returns the unit tensor
-
-    def __init__(self, N, M=None, useFrame=False):
+    def __init__(self, N, M=None):
         super(RotMat, self).__init__()
 
         M = N if M is None else M
         if M > N:
             raise Exception("M must be <= N")
+        
+        K = N-M
+        nThetas = int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
+        self.thetas = torch.nn.Parameter(torch.zeros(nThetas))
 
         self.N = N
         self.M = M
-        K = N-M
-        nThetas = int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
-        
-        self.thetas = torch.nn.Parameter( torch.empty(nThetas) )
-        torch.nn.init.uniform_(self.thetas, 0, 4*math.pi )
-
-        self.nCols = M if useFrame else N
         self.U = None
 
-    def forward(self):
-        return self.get_orthogonal_matrix()
+    def forward(self, X):
+        return RotMatFunction.apply(X, self.thetas)
 
-    def get_orthogonal_matrix(self, forward_pass=True):
-        if forward_pass or not self.U:
-            self.U = RotMatFunction.apply(self.thetas, self.N, self.nCols)
-        return self.U
+    def getU(self, forward_pass=True):
+        if not forward_pass:
+            if not self.U:
+                identity = torch.eye(self.N, self.N).to(self.thetas.get_device()).to(self.thetas.dtype)
+                self.U = RotMatFunction.apply(identity, self.thetas)
+            return self.U
+
+        identity = torch.eye(self.N, self.N).to(self.thetas.get_device()).to(self.thetas.dtype)
+        return RotMatFunction.apply(identity, self.thetas)
 
 
