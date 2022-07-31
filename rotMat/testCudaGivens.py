@@ -27,7 +27,7 @@ parameters = [
     [33, 5, 15],
     [33, 5, 3],
     [33, 5, 32],
-    [33, 5, 33]
+    #[33, 5, 33]
     ]
 parameters=[x for x in parameters if x[0] == x[2] ]
 parameters = [[x] + param for x in [True,False] for param in parameters]
@@ -35,7 +35,7 @@ parameters = [[x] + param for x in [True,False] for param in parameters]
 
 for XisId, N, M, batch in parameters: 
     K = N-M
-    rotUnit = GivensRotations.RotMat(N, M).to(device)
+    rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
     rotUnit.thetas.data = torch.ones(rotUnit.thetas.data.size()).to(device) * np.pi * 2
     thetas = rotUnit.thetas.detach().to(torch.device('cpu')).requires_grad_(True)
 
@@ -146,7 +146,7 @@ for XisId, N, M, batch in parameters:
     msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId)
     torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
     #torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
-    if N == batch and XisId:
+    if  N == batch and XisId:
         print(torch.round(Ucustom @ Ucustom.t()))
         print(msgInfo)
         print(torch.det(Ucustom))
