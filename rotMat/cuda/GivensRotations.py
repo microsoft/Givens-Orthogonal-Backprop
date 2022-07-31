@@ -12,7 +12,7 @@ class RotMatFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, x, thetas):
-        ux = rotMatcuda.forward(torch.clone(x.detach()), thetas.detach())
+        ux = rotMatcuda.forwardTeamRR(torch.clone(x.detach()), thetas.detach())
         ctx.save_for_backward(thetas, ux)
         return  ux
 
