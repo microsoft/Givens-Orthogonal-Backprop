@@ -250,19 +250,19 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor UX,
   torch::Tensor G)
 {
-  auto N = UX.size(0);
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
-  auto dMax = std::get<0>(rotMatConstants);
-  auto deadIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
-
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  const int nBlocksY = N/ThreadsPerRowBackward + (N % ThreadsPerRowBackward != 0);
+  auto constants = determineRotMatConstants(thetas.size(0), UX.size(0));
+  auto dMax = std::get<0>(constants);
+  auto deadIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
+
+  auto B = UX.size(1);
+  const int nBlocksY = B/ThreadsPerRowBackward + (B % ThreadsPerRowBackward != 0);
   const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowBackward);
 

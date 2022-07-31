@@ -14,7 +14,7 @@ dtype = torch.float32
 
 # To have same results
 torch.manual_seed(10)
-dispResults = True
+dispResults = False
 
 parameters = [
     [15, 15, 15],
