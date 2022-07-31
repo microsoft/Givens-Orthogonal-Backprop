@@ -30,7 +30,7 @@ for teamRR in [True, False]:
     if teamRR: print("Using Team RR Scheduling:") 
     else: print("Using Circle Method RR Scheduling:")
     forward = rotMatFn.forwardTeamRR if teamRR else rotMatFn.forward
-    backward = rotMatFn.backward
+    backward = rotMatFn.backwardTeamRR if teamRR else rotMatFn.backward
     # You *cannot* use time.time() to time cuda-enabled functions! The cpu
     # proceeds asynchronously, leading to ludicrous underestimates.
 
