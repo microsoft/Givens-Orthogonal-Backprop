@@ -18,13 +18,13 @@ torch.manual_seed(10)
 dispResults = True
 
 # SEQUENTIAL WILL TAKE FOREVER IF TEAM SIZE IS NOT SMALL, MAKE SURE TO CHANGE IT BEFORE TESTING
-Ns = [6, 32, 15, 30, 33]
+Ns = [ 32, 6, 15, 33]
 
 teamSize = rotMatcuda.getTeamSize()
 if teamSize <= 16: Ns = [teamSize, teamSize+1, teamSize *2 + 1]
 if teamSize <= 8: Ns.append(teamSize*4 + int(teamSize/3))
 
-Ms = [min(Ns)]#, 5, 1]
+Ms =Ns
 batch_sizes = Ns#[6, 15, 3 ,33, 65]
 
 parameters = [[x] for x in Ns]
@@ -41,8 +41,7 @@ for N, M, batch, XisId, isTeamRR in parameters:
         rotUnit = GivensRotations.RotMat(N, M).to(device)
         
     rotUnit.thetas.data = torch.randn(rotUnit.thetas.data.size()).to(device).requires_grad_(True)
-    thetas = torch.clone(rotUnit.thetas).detach().to(torch.device('cpu'))
-    thetas.requires_grad_(True)
+    thetas = torch.clone(rotUnit.thetas).detach().to(torch.device('cpu')).requires_grad_(True)
 
     G = torch.randn(N,batch).to(dtype).to(device)
 
@@ -84,9 +83,7 @@ for N, M, batch, XisId, isTeamRR in parameters:
         print(gradCustom)
 
     tstart = time.time()
-
-    playerCountInTeam = teamSize if isTeamRR else -1
-    UPyTorch = sequentialGivens(UPyTorch, thetas, M, playerCountInTeam)
+    UPyTorch = sequentialGivens(UPyTorch, thetas, M, isTeamRR, teamSize)
 
     G = G.to(torch.device('cpu'))
     loss = (G*UPyTorch).sum()
@@ -117,9 +114,7 @@ for N, M, batch, XisId, isTeamRR in parameters:
             print("UPyTorch\n",torch.round(UPyTorch @ UPyTorch.t()), "\nDETERMINANT:\n",torch.det(UPyTorch))
             print("UCUSTOM\n",torch.round(Ucustom @ Ucustom.t()), "\nDETERMINANT:\n",torch.det(Ucustom))
         torch.testing.assert_close(Ucustom @ Ucustom.t(), torch.eye(N, N), msg=msgInfo)
-    
-    print("isclose: ", torch.isclose(Ucustom, UPyTorch))
-    print(Ucustom[-1], "\n", UPyTorch[-1])
+
     torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
     #torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
     torch.cuda.synchronize()

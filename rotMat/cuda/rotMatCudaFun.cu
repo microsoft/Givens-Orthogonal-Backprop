@@ -18,7 +18,7 @@ using namespace torch::indexing;
 #define ThreadsPerRowBackward 256
 
 #define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/256)
 #define InterTeamBlockWidthForward (int)(InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward)
 
 
@@ -384,7 +384,6 @@ template <typename scalar_t>
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
     
-    if(tid ==0) printf("Blockidx: %d i %d j %d\n", threadIdx.y, i, j);
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
@@ -538,7 +537,6 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
   
   bool allThetasFitToOneTeam = ScheduleIndividualTournamentsWithinTeams(C, S, X, rotMatConstants);
   if (allThetasFitToOneTeam) return X;
-  std::cout << "\nOVER HEEEERE" << allThetasFitToOneTeam << "\n";
   ScheduleTeamTournament(C, S, X, rotMatConstants);
   
   return X;
@@ -791,10 +789,6 @@ void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
   const int nBlocksX = (B/threadsWithIdenticalWork) + (B %threadsWithIdenticalWork != 0); // 1
   const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0);
   const dim3 blocks(nBlocksX, nBlocksY);
-
-  //std::cout << "number of players: " << Ntilde<< "\n";
-  //std::cout << "IntraTeamBlockDepthForward: " << IntraTeamBlockDepthForward << "\n";
-  //std::cout << "team count: " << nBlocksY << "\n";
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),

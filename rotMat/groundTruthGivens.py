@@ -3,8 +3,8 @@ import time
 import numpy as np
 from math import ceil
 
-def sequentialGivens(UPyTorch, thetas, M, playerCountInTeam):
-    if playerCountInTeam > 0:
+def sequentialGivens(UPyTorch, thetas, M, isTeamRR, playerCountInTeam):
+    if isTeamRR:
         return sequentialGivensTeamRR(UPyTorch, thetas, M, playerCountInTeam)
     return sequentialGivensCircleMethod(UPyTorch, thetas, M)
 
@@ -75,9 +75,8 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
         if start + currentTeamSize > Ntilde:
             currentTeamSize = Ntilde - start
         
-        for blockIndx in range(int(currentTeamSize/2)):
-            print()
-            for step in range(0, currentTeamSize-1):
+        for step in range(0, currentTeamSize-1):
+            for blockIndx in range(int(currentTeamSize/2)):
                 i, j = getRowIndexPair(blockIndx, currentTeamSize, step)
                 i += start
                 j += start
@@ -96,6 +95,49 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                 GivMat[i,j] = -sij
                 GivMat[j,i] = sij
                 UPyTorch = GivMat.matmul(UPyTorch)
+
+    
+    i = j = None
+    teamCount = int(Ntilde // teamSize) + int(Ntilde % teamSize != 0);
+    dummyTeamIndex = -1;
+    if teamCount %2 == 1:
+        dummyTeamIndex = teamCount
+        teamCount += 1
+
+
+    blocksCount = int(Ntilde/2/teamSize) + int(Ntilde/2 % teamSize != 0)
+    for teamTournamentStep in range(teamCount-1):
+        for blockIndx in range(blocksCount):
+            print("asdlfjhasdkfjakdjs")
+            team_i, team_j = getRowIndexPair(blockIndx, teamCount, teamTournamentStep)
+            if team_j == dummyTeamIndex : 
+                continue
+            
+
+            iStart =  teamSize * team_i
+            jStart = teamSize * team_j
+            jCounter = -1
+            for teamMatchStep in range(teamSize):
+                jCounter += 1
+
+                for i in range(iStart, iStart + teamSize):
+                    j = i - iStart + jStart + jCounter
+                    
+                    if j >= jStart + teamSize:
+                        j -= teamSize
+
+                    if (i > dMax and j > dMax) or j>=deadNode:
+                        continue
+
+                    GivMat = torch.eye(N)
+                    GivMat[i,i] = cij
+                    GivMat[j,j] = cij
+                    GivMat[i,j] = -sij
+                    GivMat[j,i] = sij
+                    UPyTorch = GivMat.matmul(UPyTorch)
+                        
+
+
                 
 
     return UPyTorch
