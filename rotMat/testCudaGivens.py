@@ -29,7 +29,7 @@ parameters = [
     [33, 5, 32],
     [33, 5, 33]
     ]
-#parameters=[x for x in parameters if x[0] == x[2] ]
+parameters=[x for x in parameters if x[0] == x[2] ]
 parameters = [[x] + param for x in [True,False] for param in parameters]
 
 

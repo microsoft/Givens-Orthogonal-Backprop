@@ -11,13 +11,18 @@
 
 using namespace torch::indexing;
 
+#define MaximumThreadsPerBlock 1024
 #define WarpSize 32
+
 #define ThreadsPerRowForward 128
 #define ThreadsPerRowBackward 256
 
-#define TeamRRThreadsPerBlockForward 1024 
-#define IntraTeamBlockDepthForward 32
-#define InterTeamBlockDepthForward 64
+#define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
+
+// Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
+#define IntraTeamRRThreadsPerBlockForward (int)(MaximumThreadsPerBlock)
+#define IntraTeamBlockDepthForward (int)(InterTeamBlockDepthForward/2)
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
 // https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error
@@ -179,12 +184,14 @@ template <typename scalar_t>
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> X,
-    const int deadIndex,
     const int Ntilde,
+    const int deadIndex,
     const int dMax)
 {
   // If transpose k works on rows; otherwise on columns
-  const int k = threadIdx.x + blockDim.x*blockIdx.x; 
+  const int tid = threadIdx.x;
+  
+  const int k = tid + blockDim.x*blockIdx.x; 
   if (k >= X.size(1) || k*2 >= Ntilde)
   {
     return;
@@ -195,60 +202,45 @@ template <typename scalar_t>
   {
     playerCountInBlock = Ntilde;
   }
-  int blockStart = playerCountInBlock * blockIdx.y;
-  
-  __shared__ scalar_t sX[IntraTeamBlockDepthForward * 2][(int)(TeamRRThreadsPerBlockForward / IntraTeamBlockDepthForward)];
 
+  int blockStart = playerCountInBlock * blockIdx.y;
   const int N = X.size(0);
-  for (int tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
+
+  int i, j, thetaIndex;
+  scalar_t cij, sij, Xi, Xj;
+  for (int tournamentStep=0; tournamentStep<=playerCountInBlock-2; tournamentStep++)
   {
     auto rowIndices = determineRowIndexPair(threadIdx.y, playerCountInBlock, tournamentStep);
-    const int iOrg = rowIndices.first;
-    const int jOrg = rowIndices.second;
-    const int i = blockStart + rowIndices.first;
-    const int j = blockStart + rowIndices.second;
-
+    i = blockStart + rowIndices.first;
+    j = blockStart + rowIndices.second;
+    
     if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
     {
       __syncthreads();
       continue;
     }
 
-    const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-    const scalar_t cij = C[thetaIndex];
-    const scalar_t sij = S[thetaIndex];
-
-    if(tournamentStep==playerCountInBlock-2)
-    {
-      sX[iOrg][k] = X[i][k];
-      sX[jOrg][k] = X[j][k];
-    }
-    else if (tournamentStep == 0)
-    {
-      // Apply Givens: Update U's offsets
-      const scalar_t Xi = sX[iOrg][k];
-      const scalar_t Xj = sX[jOrg][k];
-
-      X[i][k] = Xi*cij - Xj*sij;
-      X[j][k] = Xi*sij + Xj*cij;
-      continue;
-    }
-    // Apply Givens: Update U's offsets
-    const scalar_t Xi = sX[iOrg][k];
-    const scalar_t Xj = sX[jOrg][k];
-
-    sX[iOrg][k] = Xi*cij - Xj*sij;
-    sX[jOrg][k] = Xi*sij + Xj*cij;
+    thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+    cij = C[thetaIndex];
+    sij = S[thetaIndex];
     
-  __syncthreads();
+    Xi = X[i][k];
+    Xj = X[j][k];
+
+    X[i][k] = Xi*cij - Xj*sij;
+    X[j][k] = Xi*sij + Xj*cij;
+    __syncthreads();
   }
 }
 
+/*
+    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
+    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
+*/
 template <typename scalar_t> __global__ void PlayTeamTournamentLeg(
   const scalar_t* const __restrict__ C,
   const scalar_t* const __restrict__ S,
   at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> U,
-  const int N,
   const int deadIndex,
   const int dMax,
   const int teamCount,
@@ -271,6 +263,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentLeg(
   const int jEnd = jStart + playerCountPerTeam;
   int j = jStart + threadIdx.y;
   
+  const int N = U.size(0);
   scalar_t Ui = U[i][col];
   for (int step =0; step < playerCountPerTeam; step++, j++)
   {
@@ -313,7 +306,7 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
-  int threadsWithIdenticalWork = TeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
+  int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, IntraTeamBlockDepthForward);
   
   int nBlocksX = (N/threadsWithIdenticalWork) + (N %threadsWithIdenticalWork != 0); // 1
@@ -329,17 +322,15 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
       C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
-      deadIndex, dMax, Ntilde);}));
+      Ntilde, deadIndex, dMax);}));
   
-  cudaDeviceSynchronize();
-  std::cout <<"\n INTRA: NOT ME!";
   // Does the entire tournament fit into a single block?
   if (nBlocksY == 1)
   {
     return X;
   }
 
-  threadsWithIdenticalWork = TeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
+  threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
   const dim3 threads2(threadsWithIdenticalWork, InterTeamBlockDepthForward);
   
   const int nBlocksX2 = (N/threadsWithIdenticalWork) + (N%threadsWithIdenticalWork != 0);
@@ -347,7 +338,6 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
   const dim3 blocks2(nBlocksX2, nBlocksY2);
 
   const int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
-
   for (int tournamentStep=teamCount-2; tournamentStep>=0; tournamentStep--)
   {
     AT_DISPATCH_FLOATING_TYPES(
@@ -357,10 +347,9 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
         C.data_ptr<scalar_t>(),
         S.data_ptr<scalar_t>(),
         X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
-        N, deadIndex, dMax, teamCount, tournamentStep);}));
-    cudaDeviceSynchronize();
-    std::cout <<"\n" << tournamentStep<<" INTER: NOT ME!";
+        deadIndex, dMax, teamCount, tournamentStep);}));
   }
+
   return X;
 }
 

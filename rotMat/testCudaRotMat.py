@@ -10,11 +10,11 @@ import time
 device = torch.device('cuda')
 dtype = torch.float32
 
-N = 2048
+N = 2000
 M = N
 K = N-M
 nThetas = int(N*(N-1)/2)
-batch_size =  64
+batch_size =  32
 
 # To drop angle params we need to have at least the last *pair* of dimensions left out
 if K > 1:
