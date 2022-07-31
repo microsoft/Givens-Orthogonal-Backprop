@@ -5,6 +5,7 @@ import torch
 import cuda.GivensRotations as GivensRotations
 import time
 import numpy as np
+import rotMatcuda
 
 # This script is not meant as a rigorous benchmark; only to verify correctness against naive autodiff
 
@@ -15,9 +16,16 @@ dtype = torch.float32
 torch.manual_seed(10)
 dispResults = False
 
+# SEQUENTIAL WILL TAKE FOREVER IF TEAM SIZE IS NOT SMALL, MAKE SURE TO CHANGE IT BEFORE TESTING
+teamSize = rotMatcuda.getTeamSize()
 
 Ns = [15, 33]
-Ms = [15, 5]
+if teamSize <= 16:
+    Ns = [teamSize, teamSize+1, teamSize *2 + 1]
+if teamSize <= 8:
+    Ns.append(teamSize*4 + int(teamSize/3))
+
+Ms = [Ns[0], 5]
 batch_sizes = [15, 3 ,33, 65]
 
 parameters = [[x] for x in Ns]
@@ -145,7 +153,7 @@ for N, M, batch, XisId, isTeamRR in parameters:
     #torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
     #torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
     if  N == batch and XisId:
-        if True:
+        if dispResults:
             print(torch.round(Ucustom @ Ucustom.t()))
             print(torch.det(Ucustom))
             print(Ucustom)

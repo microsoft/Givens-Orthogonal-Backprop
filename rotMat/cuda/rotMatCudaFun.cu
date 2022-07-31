@@ -18,7 +18,7 @@ using namespace torch::indexing;
 #define ThreadsPerRowBackward 256
 
 #define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/256)
 
 // Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
 #define IntraTeamRRThreadsPerBlockForward (int)(MaximumThreadsPerBlock)
@@ -43,6 +43,11 @@ __device__ double atomicAdd(
 #endif
 
 /************************* HELPER FUNCTIONS *********************************/
+
+int getTeamSizeForTesting()
+{
+  return InterTeamBlockDepthForward *2;
+}
 
 __device__ __forceinline__ std::pair<const int, const int> determineRowIndexPair(
   const int blockIndex,
@@ -70,13 +75,22 @@ __device__ __forceinline__ std::pair<const int, const int> determineRowIndexPair
 __device__ __forceinline__ bool areRowIndicesOutOfRange(
   const int i, 
   const int j, 
-  const int deadIndex, 
+  const int firstDummyIndex, 
   const int dMax)
 {
   // check if the coordinates are out of range or equal dummy coordinate (dummy exists when N is odd)
-  return j == deadIndex || (i > dMax && j > dMax);
+  return j >= firstDummyIndex || (i > dMax && j > dMax);
 }
 
+void addDummyIndexIfNotEven(int &Ntilde, int &dummyIndex)
+{
+  dummyIndex = -1;
+  if (Ntilde % 2 != 0)
+  {
+    Ntilde += 1;
+    dummyIndex = Ntilde-1;
+  }
+}
 
 std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int N)
 {
@@ -87,15 +101,11 @@ std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int 
   }
 
   // Handle odd N; in that case Ntilde is the even augmented dimension
-  int deadIndex = -1;
-  auto Ntilde = N;
-  if (N % 2 != 0)
-  {
-    Ntilde += 1;
-    deadIndex = Ntilde-1;
-  }
+  int dummyIndex;
+  int Ntilde = N;
+  addDummyIndexIfNotEven(Ntilde, dummyIndex);
 
-  return std::make_tuple(dMax, deadIndex, Ntilde);
+  return std::make_tuple(dMax, dummyIndex, Ntilde);
 }
 
 
@@ -120,7 +130,7 @@ template <typename scalar_t>
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> U,
-    const int deadIndex,
+    const int dummyIndex,
     const int Ntilde,
     const int dMax,
     const int tournamentStep)
@@ -134,7 +144,7 @@ template <typename scalar_t>
   auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
   const int i = rowIndices.first;
   const int j = rowIndices.second;
-  if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+  if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
   {
     return;
   }
@@ -157,7 +167,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
   const int N = X.size(0);
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
-  auto deadIndex = std::get<1>(rotMatConstants);
+  auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
   auto C = torch::cos(thetas.detach());
@@ -179,7 +189,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
-          deadIndex,Ntilde, dMax, tournamentStep);
+          dummyIndex,Ntilde, dMax, tournamentStep);
       }));
   }
 
@@ -196,7 +206,7 @@ template <typename scalar_t>
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> JVP,
-    const int deadIndex,
+    const int dummyIndex,
     const int Ntilde,
     const int dMax,
     const int tournamentStep)
@@ -215,7 +225,7 @@ template <typename scalar_t>
   auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
   int i = rowIndices.first;
   int j = rowIndices.second;
-  if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+  if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
   {
     sA[tid] = 0;
     return;
@@ -272,7 +282,7 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   auto N = UX.size(0);
   auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
-  auto deadIndex = std::get<1>(rotMatConstants);
+  auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
   auto C = torch::cos(thetas.detach());
@@ -299,7 +309,7 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
           JVP.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
-          deadIndex, Ntilde, dMax, tournamentStep);
+          dummyIndex, Ntilde, dMax, tournamentStep);
       }));
   }
   
@@ -315,7 +325,7 @@ template <typename scalar_t>
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> X,
     const int Ntilde,
-    const int deadIndex,
+    const int dummyIndex,
     const int dMax)
 {
   // If transpose k works on rows; otherwise on columns
@@ -344,7 +354,7 @@ template <typename scalar_t>
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
     
-    if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+    if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
       continue;
@@ -367,9 +377,10 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
   at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
   at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
   at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> X,
-  const int deadIndex,
+  const int dummyIndex,
   const int dMax,
   const int teamCount,
+  const int dummyTeamIndex,
   const int tournamentStep)
 {
   // If transpose k works on rows; otherwise on columns
@@ -379,18 +390,18 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
     return;
   }
 
-  // rn 2*blockDepth-1 and ntilde-1 are eqaul, need to change what we pass to determineRowIndexPAir instead of ntilde
-  auto rowIndices = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
-  
+  auto matchedTeams = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
+  if (matchedTeams.second == dummyTeamIndex)  return;
+
   const int playerCountPerTeam = blockDim.y;
-  const int i =  playerCountPerTeam * rowIndices.first + threadIdx.y; // home team
+  const int i =  playerCountPerTeam * matchedTeams.first + threadIdx.y; // home team
+  scalar_t Xi = X[i][col];
   
-  const int jStart = playerCountPerTeam * rowIndices.second;
+  const int jStart = playerCountPerTeam * matchedTeams.second; //visiting team
   const int jEnd = jStart + playerCountPerTeam;
   int j = jStart + threadIdx.y;
   
   const int N = X.size(0);
-  scalar_t Xi = X[i][col];
   for (int step =0; step < playerCountPerTeam; step++, j++)
   {
     if (j >= jEnd)
@@ -398,7 +409,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
       j -= playerCountPerTeam;
     }
     
-    if (areRowIndicesOutOfRange(i, j, deadIndex, dMax))
+    if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
       continue;
@@ -430,7 +441,7 @@ bool ScheduleIndividualTournamentsWithinTeams(
 {
   const int N = X.size(0);
   auto dMax = std::get<0>(rotMatConstants);
-  auto deadIndex = std::get<1>(rotMatConstants);
+  auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
   const int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
@@ -449,7 +460,7 @@ bool ScheduleIndividualTournamentsWithinTeams(
       C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
-      Ntilde, deadIndex, dMax);}));
+      Ntilde, dummyIndex, dMax);}));
 
   return nBlocksY == 1;
 }
@@ -462,7 +473,7 @@ void ScheduleTeamTournament(
 {
   const int N = X.size(0);
   auto dMax = std::get<0>(rotMatConstants);
-  auto deadIndex = std::get<1>(rotMatConstants);
+  auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
   const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
@@ -472,7 +483,10 @@ void ScheduleTeamTournament(
   const int nBlocksY = ((Ntilde / 2)/InterTeamBlockDepthForward) + ((Ntilde / 2)% InterTeamBlockDepthForward != 0);
   const dim3 blocks(nBlocksX, nBlocksY);
 
-  const int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
+  int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
+  int dummyTeamIndex = -1;
+  addDummyIndexIfNotEven(teamCount,dummyTeamIndex);
+  
   for (int tournamentStep=teamCount-2; tournamentStep>=0; tournamentStep--)
   {
     AT_DISPATCH_FLOATING_TYPES(
@@ -482,7 +496,7 @@ void ScheduleTeamTournament(
         C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
         S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
         X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
-        deadIndex, dMax, teamCount, tournamentStep);}));
+        dummyIndex, dMax, teamCount, dummyTeamIndex, tournamentStep);}));
   }
 }
 
