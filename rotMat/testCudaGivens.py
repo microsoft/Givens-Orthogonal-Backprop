@@ -15,17 +15,17 @@ dtype = torch.float32
 
 # To have same results
 torch.manual_seed(10)
-dispResults = True
+dispResults = False
 
 # SEQUENTIAL WILL TAKE FOREVER IF TEAM SIZE IS NOT SMALL, MAKE SURE TO CHANGE IT BEFORE TESTING
-Ns = [ 32, 6, 15, 33]
+Ns = [ 3, 32, 6, 15, 33]
 
 teamSize = rotMatcuda.getTeamSize()
 if teamSize <= 16: Ns = [teamSize, teamSize+1, teamSize *2 + 1]
 if teamSize <= 8: Ns.append(teamSize*4 + int(teamSize/3))
 
 Ms =Ns
-batch_sizes = Ns#[6, 15, 3 ,33, 65]
+batch_sizes = [6, 15, 3 ,33, 65]
 
 parameters = [[x] for x in Ns]
 parameters = [x + [m] for m in Ms for x in parameters]
@@ -34,6 +34,7 @@ parameters = [x + [isId] for isId in [True, False] for x in parameters]
 parameters = [x + [rr] for rr in [True] for x in parameters]
 
 for N, M, batch, XisId, isTeamRR in parameters: 
+    if M > N: continue
     K = N-M
     if isTeamRR:
         rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
@@ -94,7 +95,7 @@ for N, M, batch, XisId, isTeamRR in parameters:
 
     if dispResults:
         print("Torch autodiff result:")
-        print("U:")
+        print("UPyTorch:")
         print(UPyTorch)
         print("thetaGrad:")
         print(thetas.grad)
@@ -106,8 +107,8 @@ for N, M, batch, XisId, isTeamRR in parameters:
         print("Max abs deviation of grads: ")
         print(torch.absolute(thetas.grad-gradCustom).max())
 
-    print("TEAM SIZE:", teamSize)
-    print()
+    print("TEAM SIZE:", teamSize, "\n")
+    
     msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId) + " usingTeamRR: " + str(isTeamRR)
     if  N == batch and XisId:
         if dispResults: 
@@ -115,6 +116,10 @@ for N, M, batch, XisId, isTeamRR in parameters:
             print("UCUSTOM\n",torch.round(Ucustom @ Ucustom.t()), "\nDETERMINANT:\n",torch.det(Ucustom))
         torch.testing.assert_close(Ucustom @ Ucustom.t(), torch.eye(N, N), msg=msgInfo)
 
+    if N == 5 and M == 4 and batch == 6:
+        print(Ucustom)
+        print()
+        print(UPyTorch)
     torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
     #torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
     torch.cuda.synchronize()

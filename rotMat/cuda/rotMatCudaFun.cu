@@ -389,13 +389,13 @@ template <typename scalar_t>
       __syncthreads();
       continue;
     }
-
     thetaIndex = i*N - (i+2)*(i+1)/2 + j;
     cij = C[thetaIndex];
     sij = S[thetaIndex];
     
     Xi = X[i][k];
     Xj = X[j][k];
+    //if( tid == 0 ) printf("%d %d got one! -> S %.6f C %.6f \n", i, j, sij, cij);
 
     X[i][k] = Xi*cij - Xj*sij;
     X[j][k] = Xi*sij + Xj*cij;
@@ -451,6 +451,8 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
 
     // Apply Givens: Update U's offsets
     const scalar_t Xj = X[j][col];
+
+    //if( col == 0 ) printf("%d %d got one! ->  S %.6f C %.6f \n ", i, j, sij, cij);
 
     // must update uj before updating ui
     X[j][col] = Xi*sij + Xj*cij;
