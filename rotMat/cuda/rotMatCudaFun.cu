@@ -363,14 +363,10 @@ template <typename scalar_t>
   }
 }
 
-/*
-    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
-    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
-*/
 template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
-  const scalar_t* const __restrict__ C,
-  const scalar_t* const __restrict__ S,
-  at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> U,
+  at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
+  at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
+  at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> X,
   const int deadIndex,
   const int dMax,
   const int teamCount,
@@ -378,7 +374,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
 {
   // If transpose k works on rows; otherwise on columns
   const int col = threadIdx.x + blockDim.x*blockIdx.x;
-  if (col >= U.size(1))
+  if (col >= X.size(1))
   {
     return;
   }
@@ -393,8 +389,8 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
   const int jEnd = jStart + playerCountPerTeam;
   int j = jStart + threadIdx.y;
   
-  const int N = U.size(0);
-  scalar_t Ui = U[i][col];
+  const int N = X.size(0);
+  scalar_t Xi = X[i][col];
   for (int step =0; step < playerCountPerTeam; step++, j++)
   {
     if (j >= jEnd)
@@ -413,73 +409,95 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
     const scalar_t sij = S[thetaIndex];
 
     // Apply Givens: Update U's offsets
-    const scalar_t Uj = U[j][col];
+    const scalar_t Xj = X[j][col];
 
     // must update uj before updating ui
-    U[j][col] = Ui*sij + Uj*cij;
-    Ui = Ui*cij - Uj*sij;
+    X[j][col] = Xi*sij + Xj*cij;
+    Xi = Xi*cij - Xj*sij;
 
     __syncthreads();
   }
 
-  U[i][col] = Ui;
+  X[i][col] = Xi;
 }
 
-torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
+
+bool ScheduleIndividualTournamentsWithinTeams(
+  torch::Tensor C, 
+  torch::Tensor S, 
+  torch::Tensor X,
+  std::tuple<int, int, int> rotMatConstants)
 {
   const int N = X.size(0);
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
   auto dMax = std::get<0>(rotMatConstants);
   auto deadIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  auto C = torch::cos(thetas.detach());
-  auto S = torch::sin(thetas.detach());
-
-  int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
+  const int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, IntraTeamBlockDepthForward);
   
-  int nBlocksX = (N/threadsWithIdenticalWork) + (N %threadsWithIdenticalWork != 0); // 1
-  int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0); // 2
+  const int nBlocksX = (N/threadsWithIdenticalWork) + (N %threadsWithIdenticalWork != 0); // 1
+  const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0); // 2
   const dim3 blocks(nBlocksX, nBlocksY);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   AT_DISPATCH_FLOATING_TYPES(
-    thetas.type(),
+    C.type(),
     "rotMatForwardCuda",
     ([&]{ PlayIndividualTournamentWithinTeams<scalar_t><<<blocks,threads>>>(
       C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
       Ntilde, deadIndex, dMax);}));
-  
-  // Does the entire tournament fit into a single block?
-  if (nBlocksY == 1)
-  {
-    return X;
-  }
 
-  threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
-  const dim3 threads2(threadsWithIdenticalWork, InterTeamBlockDepthForward);
+  return nBlocksY == 1;
+}
+
+void ScheduleTeamTournament(
+  torch::Tensor C, 
+  torch::Tensor S, 
+  torch::Tensor X,
+  std::tuple<int, int, int> rotMatConstants)
+{
+  const int N = X.size(0);
+  auto dMax = std::get<0>(rotMatConstants);
+  auto deadIndex = std::get<1>(rotMatConstants);
+  auto Ntilde = std::get<2>(rotMatConstants);
+
+  const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
+  const dim3 threads(threadsWithIdenticalWork, InterTeamBlockDepthForward);
   
-  const int nBlocksX2 = (N/threadsWithIdenticalWork) + (N%threadsWithIdenticalWork != 0);
-  const int nBlocksY2 = ((Ntilde / 2)/InterTeamBlockDepthForward) + ((Ntilde / 2)% InterTeamBlockDepthForward != 0);
-  const dim3 blocks2(nBlocksX2, nBlocksY2);
+  const int nBlocksX = (N/threadsWithIdenticalWork) + (N%threadsWithIdenticalWork != 0);
+  const int nBlocksY = ((Ntilde / 2)/InterTeamBlockDepthForward) + ((Ntilde / 2)% InterTeamBlockDepthForward != 0);
+  const dim3 blocks(nBlocksX, nBlocksY);
 
   const int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
   for (int tournamentStep=teamCount-2; tournamentStep>=0; tournamentStep--)
   {
     AT_DISPATCH_FLOATING_TYPES(
-      thetas.type(),
+      C.type(),
       "rotMatForwardCuda",
-      ([&]{ PlayTeamTournamentMatch<scalar_t><<<blocks2,threads2>>>(
-        C.data_ptr<scalar_t>(),
-        S.data_ptr<scalar_t>(),
+      ([&]{ PlayTeamTournamentMatch<scalar_t><<<blocks,threads>>>(
+        C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
+        S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
         X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
         deadIndex, dMax, teamCount, tournamentStep);}));
   }
+}
 
+
+torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
+{
+  auto rotMatConstants = determineRotMatConstants(thetas.size(0), X.size(0));
+  auto C = torch::cos(thetas.detach());
+  auto S = torch::sin(thetas.detach());
+  
+  bool allThetasFitToOneTeam = ScheduleIndividualTournamentsWithinTeams(C, S, X, rotMatConstants);
+  if (allThetasFitToOneTeam) return X;
+  
+  ScheduleTeamTournament(C, S, X, rotMatConstants);
+  
   return X;
 }
 

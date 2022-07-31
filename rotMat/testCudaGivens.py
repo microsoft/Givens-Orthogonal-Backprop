@@ -15,27 +15,25 @@ dtype = torch.float32
 torch.manual_seed(10)
 dispResults = False
 
-parameters = [
-    [15, 15, 15],
-    [15, 15, 3],
-    [15, 15, 32],
-    [15, 5, 15],
-    [15, 5, 32],
-    [33, 15, 15],
-    [33, 15, 3],
-    [33, 15, 32],
-    [33, 5, 15],
-    [33, 5, 3],
-    [33, 5, 32],
-    #[33, 5, 33]
-    ]
-parameters=[x for x in parameters if x[0] == x[2] ]
-parameters = [[x] + param for x in [True,False] for param in parameters]
+
+Ns = [15, 33]
+Ms = [15, 5]
+batch_sizes = [15, 3 ,33, 65]
+
+parameters = [[x] for x in Ns]
+parameters = [x + [m] for m in Ms for x in parameters]
+parameters = [x + [b] for b in batch_sizes for x in parameters]
+parameters = [x + [isId] for isId in [True, False] for x in parameters]
+parameters = [x + [isTeamRR] for isTeamRR in [True, False] for x in parameters]
 
 
-for XisId, N, M, batch in parameters: 
+for N, M, batch, XisId, isTeamRR in parameters: 
     K = N-M
-    rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
+    if isTeamRR:
+        rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
+    else:
+        rotUnit = GivensRotations.RotMat(N, M).to(device)
+        
     rotUnit.thetas.data = torch.ones(rotUnit.thetas.data.size()).to(device) * np.pi * 2
     thetas = rotUnit.thetas.detach().to(torch.device('cpu')).requires_grad_(True)
 
@@ -144,14 +142,14 @@ for XisId, N, M, batch in parameters:
         print(torch.absolute(thetas.grad-gradCustom).max())
 
     msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId)
-    torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
+    #torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
     #torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
     if  N == batch and XisId:
-        print(torch.round(Ucustom @ Ucustom.t()))
-        print(msgInfo)
-        print(torch.det(Ucustom))
-        print()
-        torch.testing.assert_close(Ucustom @ Ucustom.t(), torch.eye(N,N), msg=msgInfo)
+        if True:
+            print(torch.round(Ucustom @ Ucustom.t()))
+            print(torch.det(Ucustom))
+            print(Ucustom)
+        torch.testing.assert_close(Ucustom @ Ucustom.t(), torch.eye(N, N), msg=msgInfo)
     torch.cuda.synchronize()
 
 print("All tests passed!")
