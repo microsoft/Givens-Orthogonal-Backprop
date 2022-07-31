@@ -1,6 +1,7 @@
 import torch
 import time
 import numpy as np
+from math import ceil
 
 def sequentialGivens(UPyTorch, thetas, M, playerCountInTeam):
     if playerCountInTeam > 0:
@@ -29,7 +30,7 @@ def sequentialGivensCircleMethod(UPyTorch, thetas, M):
         dMax -= K
 
     Ntilde = N
-    deadNode = -1
+    deadNode = Ntilde
     if N%2 == 1:
         Ntilde += 1
         deadNode = Ntilde-1
@@ -38,7 +39,7 @@ def sequentialGivensCircleMethod(UPyTorch, thetas, M):
         for blockIndx in range(int(Ntilde/2)):
 
             i, j = getRowIndexPair(blockIndx, Ntilde, step)
-            if (i > dMax and j > dMax) or j==deadNode:
+            if (i > dMax and j > dMax) or j>=deadNode:
                 continue
 
             thetaIndx = int( i*N - (i+2)*(i+1)/2 + j )
@@ -51,6 +52,7 @@ def sequentialGivensCircleMethod(UPyTorch, thetas, M):
             GivMat[i,j] = -sij
             GivMat[j,i] = sij
             UPyTorch = GivMat.matmul(UPyTorch)
+
     return UPyTorch
 
 def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
@@ -65,21 +67,23 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
     deadNode = Ntilde
     if N%2 == 1:
         Ntilde += 1
-        deadNode = Ntilde-1
-
-    for indexStart in range(0, Ntilde, teamSize):
-        
+    
+    teamcount = int(Ntilde/ teamSize) + int(Ntilde % teamSize != 0)
+    for teamNo in range(0, teamcount):
+        start = teamNo*teamSize
         currentTeamSize = teamSize
-        if indexStart + currentTeamSize > Ntilde:
-            currentTeamSize = Ntilde - indexStart
-        for blockIndx in range(teamSize):
-            for step in range(0, Ntilde-1):
+        if start + currentTeamSize > Ntilde:
+            currentTeamSize = Ntilde - start
+        
+        for blockIndx in range(int(currentTeamSize/2)):
+            print()
+            for step in range(0, currentTeamSize-1):
                 i, j = getRowIndexPair(blockIndx, currentTeamSize, step)
+                i += start
+                j += start
+                #print("blockIndx", blockIndx, "i, j", i,j)
 
-                i += indexStart
-                j += indexStart
-
-                if (i > dMax and j > dMax) or j==deadNode or j>=Ntilde:
+                if (i > dMax and j > dMax) or j>=deadNode:
                     continue
 
                 thetaIndx = int( i*N - (i+2)*(i+1)/2 + j )
