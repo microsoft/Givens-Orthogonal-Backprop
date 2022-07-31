@@ -86,11 +86,10 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
 
 void addDummyIndexIfNotEven(int &Ntilde, int &dummyIndex)
 {
-  dummyIndex = -1;
+  dummyIndex = Ntilde;
   if (Ntilde % 2 != 0)
   {
     Ntilde += 1;
-    dummyIndex = Ntilde-1;
   }
 }
 
@@ -126,7 +125,7 @@ template <typename scalar_t>
 
 template <typename scalar_t>
   __device__ void warpReduceAtBackwardIntraTeamRR(
-    volatile scalar_t* sdata, 
+    volatile scalar_t* sdata,
     int tid)
 {
   if (IntraTeamBlockWidthForward >= 64)  sdata[tid] += sdata[tid + 32];
@@ -371,14 +370,14 @@ template <typename scalar_t>
   }
 
   int playerCountInBlock = IntraTeamBlockDepthForward *2;
-  if (playerCountInBlock > Ntilde)
+  int blockStart = playerCountInBlock * blockIdx.y;
+
+  if (playerCountInBlock > Ntilde-blockStart)
   {
-    playerCountInBlock = Ntilde;
+    playerCountInBlock = Ntilde-blockStart;
   }
 
-  int blockStart = playerCountInBlock * blockIdx.y;
   const int N = X.size(0);
-
   int i, j, thetaIndex;
   scalar_t cij, sij, Xi, Xj;
   for (int tournamentStep=0; tournamentStep<=playerCountInBlock-2; tournamentStep++)
@@ -441,7 +440,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
     {
       j -= playerCountPerTeam;
     }
-    
+
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
@@ -552,7 +551,7 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
 
 template <typename scalar_t> 
   __global__ void PlayThetaGradTeamTournamentMatch(
-    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> X,
+    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
@@ -563,10 +562,15 @@ template <typename scalar_t>
     const int dummyTeamIndex,
     const int tournamentStep)
 {
+  __shared__ scalar_t sAPerRow[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
+  scalar_t* sA = sAPerRow[threadIdx.y];
+
   // If transpose k works on rows; otherwise on columns
-  const int col = threadIdx.x + blockDim.x*blockIdx.x;
-  if (col >= X.size(1))
+  const int k = threadIdx.x + blockDim.x*blockIdx.x;
+  const int tid = threadIdx.x;
+  if (k >= UX.size(1))
   {
+    sA[tid] = 0;
     return;
   }
 
@@ -575,13 +579,16 @@ template <typename scalar_t>
 
   const int playerCountPerTeam = blockDim.y;
   const int i =  playerCountPerTeam * matchedTeams.first + threadIdx.y; // home team
-  scalar_t Xi = X[i][col];
-  
+  scalar_t UXi = UX[i][k];
+  scalar_t Gi = G[i][k];
+
   const int jStart = playerCountPerTeam * matchedTeams.second; //visiting team
   const int jEnd = jStart + playerCountPerTeam;
   int j = jStart + threadIdx.y;
   
-  const int N = X.size(0);
+  const int N = UX.size(0);
+  int thetaIndex;
+  scalar_t cij, sij, UXj, newUXi, newUXj, Gj, newGi, newGj;
   for (int step =0; step < playerCountPerTeam; step++, j++)
   {
     if (j >= jEnd)
@@ -591,28 +598,137 @@ template <typename scalar_t>
     
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
+      sA[tid] = 0;
       __syncthreads();
       continue;
     }
 
-    const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-    const scalar_t cij = C[thetaIndex];
-    const scalar_t sij = S[thetaIndex];
+    thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+    cij = C[thetaIndex];
+    sij = -S[thetaIndex];
 
     // Apply Givens: Update U's offsets
-    const scalar_t Xj = X[j][col];
+    UXj = UX[j][k];
+    newUXj = UXi*sij + UXj*cij; // must update j before updating i
+    UXi = UXi*cij - UXj*sij; 
 
-    // must update uj before updating ui
-    const scalar_t newXj = Xi*sij + Xj*cij;
-    X[j][col] = newXj;
-    Xi = Xi*cij - Xj*sij;
+    Gj = G[j][k];
+    newGj = Gi*sij + Gj*cij; // must update j before updating i
+    Gi = Gi*cij - Gj*sij;
 
-    
+    UX[j][k] = newUXj; 
+    G[j][k] = newGj;
+
+    sA[tid] = newUXi * newGj - newUXj * newGi;
     __syncthreads();
+
+    // Reduce
+    if (InterTeamBlockWidthForward == 1024) {
+      if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
+    if (InterTeamBlockWidthForward >= 512) {
+      if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
+    if (InterTeamBlockWidthForward >= 256) {
+      if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
+    if (InterTeamBlockWidthForward >= 128) {
+      if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
+    if (tid < 32) warpReduceAtBackwardInterTeamRR(sA, tid);
+    
+    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 
-  X[i][col] = Xi;
+  UX[i][k] = UXi;
 }
+
+
+template <typename scalar_t> 
+  __global__ void PlayThetaGradTournamentWithinTeams(
+    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
+    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
+    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
+    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
+    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> JVP,
+    const int dummyIndex,
+    const int Ntilde,
+    const int dMax)
+{
+  __shared__ scalar_t sAPerRow[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
+  
+  const int tidY = threadIdx.y;
+  scalar_t* sA = sAPerRow[tidY];
+
+  // k is the column index of M and the row index of Uf, to set col of A
+  const int tid = threadIdx.x;
+  const int k = tid + blockDim.x*blockIdx.x; 
+  if (k >= UX.size(1) || k*2 >= Ntilde)
+  {
+    sA[tid] = 0;
+    return;
+  }
+
+  int playerCountInBlock = IntraTeamBlockDepthForward *2;
+  int blockStart = playerCountInBlock * blockIdx.y;
+
+  if (playerCountInBlock > Ntilde-blockStart)
+  {
+    playerCountInBlock = Ntilde-blockStart;
+  }
+
+  const int N = UX.size(0);
+  int i, j, thetaIndex;
+  scalar_t cij, sij, UXi, UXj, newUXi, newUXj, Gi, Gj, newGi, newGj;
+  for (int tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
+  {
+    auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
+    i = blockStart + rowIndices.first;
+    j = blockStart + rowIndices.second;
+
+    if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
+    {
+      sA[tid] = 0;
+      __syncthreads();
+      continue;
+    }
+
+    thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+    cij = C[thetaIndex];
+    sij = -S[thetaIndex]; // Transpose of a Givens rotation has the signs of sij flipped
+    
+    Gi = G[i][k];
+    Gj = G[j][k];
+
+    newGi = Gi*cij - Gj*sij;
+    G[i][k] = newGi;
+
+    newGj = Gi*sij + Gj*cij;
+    G[j][k] = newGj;
+
+    UXi = UX[i][k];
+    UXj = UX[j][k];
+
+    newUXi = UXi*cij - UXj*sij;
+    UX[i][k] = newUXi;
+
+    newUXj = UXi*sij + UXj*cij;
+    UX[j][k] = newUXj;
+
+    sA[tid] = newUXi * newGj - newUXj * newGi;
+    __syncthreads();
+
+    // Reduce
+    if (IntraTeamBlockWidthForward == 1024) {
+      if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
+    if (IntraTeamBlockWidthForward >= 512) {
+      if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
+    if (IntraTeamBlockWidthForward >= 256) {
+      if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
+    if (IntraTeamBlockWidthForward >= 128) {
+      if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
+    if (tid < 32) warpReduceAtBackwardIntraTeamRR(sA, tid);
+    
+    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
+  }
+}
+
 
 void ScheduleTeamTournamentForThetaGrads(
   torch::Tensor C, 
@@ -658,95 +774,6 @@ void ScheduleTeamTournamentForThetaGrads(
   }
 }
 
-template <typename scalar_t> 
-  __global__ void PlayThetaGradTournamentWithinTeams(
-    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
-    at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
-    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
-    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
-    at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> JVP,
-    const int dummyIndex,
-    const int Ntilde,
-    const int dMax)
-{
-  //__shared__ scalar_t sA[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
-
-  // k is the column index of M and the row index of Uf, to set col of A
-  const int tid = threadIdx.x;
-  const int tidY = threadIdx.y;
-  const int k = tid + blockDim.x*blockIdx.x; 
-  if (k >= UX.size(1) || k*2 >= Ntilde)
-  {
-    //sA[tid] = 0;
-    return;
-  }
-
-  int playerCountInBlock = IntraTeamBlockDepthForward *2;
-  if (playerCountInBlock > Ntilde)
-  {
-    playerCountInBlock = Ntilde;
-  }
-
-  int blockStart = playerCountInBlock * blockIdx.y;
-  const int N = UX.size(0);
-
-  int i, j, thetaIndex;
-  scalar_t cij, sij, UXi, UXj, newUXi, newUXj, Gi, Gj, newGi, newGj;
-  for (int tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
-  {
-    auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
-    i = blockStart + rowIndices.first;
-    j = blockStart + rowIndices.second;
-
-    if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
-    {
-      //sA[tid] = 0;
-      __syncthreads();
-      continue;
-    }
-
-    thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-    cij = C[thetaIndex];
-    sij = -S[thetaIndex]; // Transpose of a Givens rotation has the signs of sij flipped
-    
-    Gi = G[i][k];
-    Gj = G[j][k];
-
-    newGi = Gi*cij - Gj*sij;
-    G[i][k] = newGi;
-
-    newGj = Gi*sij + Gj*cij;
-    G[j][k] = newGj;
-
-    UXi = UX[i][k];
-    UXj = UX[j][k];
-
-    newUXi = UXi*cij - UXj*sij;
-    UX[i][k] = newUXi;
-
-    newUXj = UXi*sij + UXj*cij;
-    UX[j][k] = newUXj;
-
-    const scalar_t res =  newUXi * newGj - newUXj * newGi;
-    atomicAdd(&JVP[thetaIndex], res);
-
-    __syncthreads();
-
-    /* Reduce
-    if (IntraTeamBlockWidthForward == 1024) {
-      if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
-    if (IntraTeamBlockWidthForward >= 512) {
-      if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads();}
-    if (IntraTeamBlockWidthForward >= 256) {
-      if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-    if (IntraTeamBlockWidthForward >= 128) {
-      if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-    if(tid < 32) warpReduceAtBackward(sA, tid);
-    
-    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);*/
-  }
-}
-
 void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
   torch::Tensor C, 
   torch::Tensor S, 
@@ -771,8 +798,6 @@ void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
   std::cout << "IntraTeamBlockDepthForward: " << IntraTeamBlockDepthForward << "\n";
   std::cout << "team count: " << nBlocksY << "\n";
 
-  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
-  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
     "rotMatForwardCuda",
