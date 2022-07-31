@@ -6,8 +6,6 @@ import torch
 import rotMatcuda as rotMatFn
 import torch.cuda.profiler as profiler
 
-
-
 device = torch.device('cuda')
 dtype = torch.float32
 
@@ -25,6 +23,16 @@ nNs = len(Ns)
 bs = 32
 nTrials = 100
 
+def calculateThetaCount(N,M):
+    K = N-M
+    nThetas = int(N*(N-1)/2)
+    # To drop angle params we need to have at least the last *pair* of dimensions left out
+    if K > 1: nThetas -= int(K*(K-1)/2)
+    return nThetas
+
+# You *cannot* use time.time() to time cuda-enabled functions! The cpu
+# proceeds asynchronously, leading to ludicrous underestimates.
+# The elapsed_time function returns time in *milliseconds*
 forwardMilliseconds = torch.zeros(nNs)
 backwardMilliseconds = torch.zeros(nNs)
 
@@ -32,27 +40,15 @@ profiler.start()
 for i,N in enumerate(Ns):
 
     #print("On N={0:d}; largest is {1:d}".format(N,Nmax) )
-
-    M = N
-    K = N-M
-    nThetas = int(N*(N-1)/2)
-
-    # To drop angle params we need to have at least the last *pair* of dimensions left out
-    if K > 1:
-        nThetas -= int(K*(K-1)/2)
+    nThetas = calculateThetaCount(N,N)
     #print("nThetas=" +str(nThetas) )
-
-    #G = torch.randn(N,N,requires_grad=True).to(dtype).to(device)
 
     for t in range(nTrials+1):
         thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
         X = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
         G = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
         torch.cuda.synchronize()
-        # You *cannot* use time.time() to time cuda-enabled functions! The cpu
-        # proceeds asynchronously, leading to ludicrous underestimates.
-        #
-        # The elapsed_time function returns time in *milliseconds*
+
         if t == 0:
             # warm up
             U = rotMatFn.forward(X,thetas)

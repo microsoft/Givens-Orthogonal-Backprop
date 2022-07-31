@@ -18,7 +18,7 @@ using namespace torch::indexing;
 #define ThreadsPerRowBackward 256
 
 #define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/256)
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
 
 // Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
 #define IntraTeamRRThreadsPerBlockForward (int)(MaximumThreadsPerBlock)
@@ -164,21 +164,24 @@ template <typename scalar_t>
 
 torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
 {
-  const int N = X.size(0);
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
-
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
-  const int nBlocksY = X.size(1)/ThreadsPerRowForward + (X.size(1)% ThreadsPerRowForward != 0);
+  auto constants = determineRotMatConstants(thetas.size(0), X.size(0));
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
+
+  auto B = X.size(1);
+  const int nBlocksY = B/ThreadsPerRowForward + (B% ThreadsPerRowForward != 0);
   const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowForward);
 
-  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
-  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
+  /* The circle-method is used to generate round-robin sequences per block 
+    (equivalent to scheduling round-robin sports tournaments)
+    'tournamentStep' refers to to the current round of the tournament.
+     In a round, all updates are executed in parallel. There are n-1 steps
+  */
   for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
     AT_DISPATCH_FLOATING_TYPES(
@@ -200,7 +203,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
 // USING THE CIRCLE ROUND ROBIN TOURNAMENT FOR SEQUENCING GIVENS ROTATIONS
 
 template <typename scalar_t> 
-  __global__ void CalculateRoundRobinGivensThetaJVPs(
+  __global__ void CalculateGivensThetaGrad(
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
@@ -279,31 +282,33 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor UX,
   torch::Tensor G)
 {
-  auto N = UX.size(0);
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
-
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  const int nBlocksY = N/ThreadsPerRowBackward + (N % ThreadsPerRowBackward != 0);
-  const dim3 blocks(Ntilde / 2, nBlocksY);
+  auto constants = determineRotMatConstants(thetas.size(0), UX.size(0));
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
+  
+  auto B = UX.size(1);
+  const dim3 blocks(Ntilde / 2, B/ThreadsPerRowBackward + (B % ThreadsPerRowBackward != 0));
   const dim3 threads(1, ThreadsPerRowBackward);
 
-  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
-  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. here are n-1 steps
+  /* The circle-method is used to generate round-robin sequences per block 
+    (equivalent to scheduling round-robin sports tournaments)
+    'tournamentStep' refers to to the current round of the tournament.
+     In a round, all updates are executed in parallel. There are n-1 steps
+  */
   for (int tournamentStep=0; tournamentStep<=Ntilde-2; tournamentStep++)
   {
     AT_DISPATCH_FLOATING_TYPES(
-      thetas.type(),
+      C.type(),
       "rotMatBackwardCuda",
       ([&]{
-        CalculateRoundRobinGivensThetaJVPs<scalar_t><<<blocks,threads>>>(
+        CalculateGivensThetaGrad<scalar_t><<<blocks,threads>>>(
           UX.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
