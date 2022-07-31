@@ -17,14 +17,16 @@ using namespace torch::indexing;
 #define ThreadsPerRowForward 128
 #define ThreadsPerRowBackward 256
 
-#define InterTeamThreadsPerBlock MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamThreadsPerBlock/WarpSize)
-#define InterTeamBlockWidthForward (int)(InterTeamThreadsPerBlock/InterTeamBlockDepthForward)
+#define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
+#define InterTeamBlockWidthForward (int)(InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward)
+
 
 // Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
-#define IntraTeamThreadsPerBlock MaximumThreadsPerBlock
+#define IntraTeamRRThreadsPerBlockForward (int)(MaximumThreadsPerBlock)
 #define IntraTeamBlockDepthForward (int)(InterTeamBlockDepthForward/2)
-#define IntraTeamBlockWidthForward (int)(IntraTeamThreadsPerBlock/IntraTeamBlockDepthForward)
+#define IntraTeamBlockWidthForward (int)(IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward)
+
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
 // https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error
@@ -48,7 +50,7 @@ __device__ double atomicAdd(
 
 int getTeamSizeForTesting()
 {
-  return InterTeamBlockDepthForward *2;
+  return InterTeamBlockDepthForward;
 }
 
 __device__ __forceinline__ std::pair<const int, const int> determineRowIndexPair(
@@ -90,6 +92,7 @@ void addDummyIndexIfNotEven(int &Ntilde, int &dummyIndex)
   if (Ntilde % 2 != 0)
   {
     Ntilde += 1;
+    dummyIndex = Ntilde-1;
   }
 }
 
@@ -123,17 +126,18 @@ template <typename scalar_t>
   if (ThreadsPerRowBackward >= 2) sdata[tid] += sdata[tid + 1];
 }
 
+
 template <typename scalar_t>
   __device__ void warpReduceAtBackwardIntraTeamRR(
     volatile scalar_t* sdata,
     int tid)
 {
-  if (IntraTeamBlockWidthForward >= 64)  sdata[tid] += sdata[tid + 32];
-  if (IntraTeamBlockWidthForward >= 32) sdata[tid] += sdata[tid + 16];
-  if (IntraTeamBlockWidthForward >= 16) sdata[tid] += sdata[tid + 8];
-  if (IntraTeamBlockWidthForward >= 8) sdata[tid] += sdata[tid + 4];
-  if (IntraTeamBlockWidthForward >= 4) sdata[tid] += sdata[tid + 2];
-  if (IntraTeamBlockWidthForward >= 2) sdata[tid] += sdata[tid + 1];
+  if (IntraTeamRRThreadsPerBlockForward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (IntraTeamRRThreadsPerBlockForward >= 32) sdata[tid] += sdata[tid + 16];
+  if (IntraTeamRRThreadsPerBlockForward >= 16) sdata[tid] += sdata[tid + 8];
+  if (IntraTeamRRThreadsPerBlockForward >= 8) sdata[tid] += sdata[tid + 4];
+  if (IntraTeamRRThreadsPerBlockForward >= 4) sdata[tid] += sdata[tid + 2];
+  if (IntraTeamRRThreadsPerBlockForward >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 template <typename scalar_t>
@@ -141,12 +145,12 @@ template <typename scalar_t>
     volatile scalar_t* sdata, 
     int tid)
 {
-  if (InterTeamBlockWidthForward >= 64)  sdata[tid] += sdata[tid + 32];
-  if (InterTeamBlockWidthForward >= 32) sdata[tid] += sdata[tid + 16];
-  if (InterTeamBlockWidthForward >= 16) sdata[tid] += sdata[tid + 8];
-  if (InterTeamBlockWidthForward >= 8) sdata[tid] += sdata[tid + 4];
-  if (InterTeamBlockWidthForward >= 4) sdata[tid] += sdata[tid + 2];
-  if (InterTeamBlockWidthForward >= 2) sdata[tid] += sdata[tid + 1];
+  if (InterTeamRRThreadsPerBlockForward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (InterTeamRRThreadsPerBlockForward >= 32) sdata[tid] += sdata[tid + 16];
+  if (InterTeamRRThreadsPerBlockForward >= 16) sdata[tid] += sdata[tid + 8];
+  if (InterTeamRRThreadsPerBlockForward >= 8) sdata[tid] += sdata[tid + 4];
+  if (InterTeamRRThreadsPerBlockForward >= 4) sdata[tid] += sdata[tid + 2];
+  if (InterTeamRRThreadsPerBlockForward >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 /************************* FORWARD PROPAGATION*******************************/
@@ -191,24 +195,21 @@ template <typename scalar_t>
 
 torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
 {
+  const int N = X.size(0);
+  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
+  auto dMax = std::get<0>(rotMatConstants);
+  auto dummyIndex = std::get<1>(rotMatConstants);
+  auto Ntilde = std::get<2>(rotMatConstants);
+
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
-  auto constants = determineRotMatConstants(thetas.size(0), X.size(0));
-  auto dMax = std::get<0>(constants);
-  auto dummyIndex = std::get<1>(constants);
-  auto Ntilde = std::get<2>(constants);
-
-  auto B = X.size(1);
-  const int nBlocksY = B/ThreadsPerRowForward + (B% ThreadsPerRowForward != 0);
+  const int nBlocksY = X.size(0)/ThreadsPerRowForward + (X.size(0)% ThreadsPerRowForward != 0);
   const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowForward);
 
-  /* The circle-method is used to generate round-robin sequences per block 
-    (equivalent to scheduling round-robin sports tournaments)
-    'tournamentStep' refers to to the current round of the tournament.
-     In a round, all updates are executed in parallel. There are n-1 steps
-  */
+  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
+  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   for (int tournamentStep=Ntilde-2; tournamentStep>=0; tournamentStep--)
   {
     AT_DISPATCH_FLOATING_TYPES(
@@ -230,7 +231,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
 // USING THE CIRCLE ROUND ROBIN TOURNAMENT FOR SEQUENCING GIVENS ROTATIONS
 
 template <typename scalar_t> 
-  __global__ void CalculateGivensThetaGrad(
+  __global__ void CalculateRoundRobinGivensThetaJVPs(
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
@@ -309,33 +310,31 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor UX,
   torch::Tensor G)
 {
+  auto N = UX.size(0);
+  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
+  auto dMax = std::get<0>(rotMatConstants);
+  auto dummyIndex = std::get<1>(rotMatConstants);
+  auto Ntilde = std::get<2>(rotMatConstants);
+
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  auto constants = determineRotMatConstants(thetas.size(0), UX.size(0));
-  auto dMax = std::get<0>(constants);
-  auto dummyIndex = std::get<1>(constants);
-  auto Ntilde = std::get<2>(constants);
-  
-  auto B = UX.size(1);
-  const dim3 blocks(Ntilde / 2, B/ThreadsPerRowBackward + (B % ThreadsPerRowBackward != 0));
+  const int nBlocksY = N/ThreadsPerRowBackward + (N % ThreadsPerRowBackward != 0);
+  const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowBackward);
 
-  /* The circle-method is used to generate round-robin sequences per block 
-    (equivalent to scheduling round-robin sports tournaments)
-    'tournamentStep' refers to to the current round of the tournament.
-     In a round, all updates are executed in parallel. There are n-1 steps
-  */
+  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
+  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. here are n-1 steps
   for (int tournamentStep=0; tournamentStep<=Ntilde-2; tournamentStep++)
   {
     AT_DISPATCH_FLOATING_TYPES(
-      C.type(),
+      thetas.type(),
       "rotMatBackwardCuda",
       ([&]{
-        CalculateGivensThetaGrad<scalar_t><<<blocks,threads>>>(
+        CalculateRoundRobinGivensThetaJVPs<scalar_t><<<blocks,threads>>>(
           UX.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
           C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
@@ -362,16 +361,15 @@ template <typename scalar_t>
 {
   // If transpose k works on rows; otherwise on columns
   const int tid = threadIdx.x;
-  
+  const int tidY = threadIdx.y;
   const int k = tid + blockDim.x*blockIdx.x; 
-  if (k >= X.size(1) || k*2 >= Ntilde)
+  if (k >= X.size(1) || tidY*2 >= Ntilde)
   {
     return;
   }
 
   int playerCountInBlock = IntraTeamBlockDepthForward *2;
   int blockStart = playerCountInBlock * blockIdx.y;
-
   if (playerCountInBlock > Ntilde-blockStart)
   {
     playerCountInBlock = Ntilde-blockStart;
@@ -382,10 +380,11 @@ template <typename scalar_t>
   scalar_t cij, sij, Xi, Xj;
   for (int tournamentStep=0; tournamentStep<=playerCountInBlock-2; tournamentStep++)
   {
-    auto rowIndices = determineRowIndexPair(threadIdx.y, playerCountInBlock, tournamentStep);
+    auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
     
+    if(tid ==0) printf("Blockidx: %d i %d j %d\n", threadIdx.y, i, j);
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
@@ -440,7 +439,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
     {
       j -= playerCountPerTeam;
     }
-
+    
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
@@ -464,6 +463,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
   X[i][col] = Xi;
 }
 
+
 bool ScheduleIndividualTournamentsWithinTeams(
   torch::Tensor C, 
   torch::Tensor S, 
@@ -474,16 +474,14 @@ bool ScheduleIndividualTournamentsWithinTeams(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const int threadsWithIdenticalWork = IntraTeamThreadsPerBlock/IntraTeamBlockDepthForward;
+  const int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, IntraTeamBlockDepthForward);
-  
+
   const int B = X.size(1);
-  const int nBlocksX = (B/threadsWithIdenticalWork) + (B %threadsWithIdenticalWork != 0); // 1
-  const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0);
+  const int nBlocksX = (B/threadsWithIdenticalWork) + (B %threadsWithIdenticalWork != 0);
+  const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0); 
   const dim3 blocks(nBlocksX, nBlocksY);
 
-  // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
-  // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. There are n-1 steps
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
     "rotMatForwardCuda",
@@ -506,7 +504,7 @@ void ScheduleTeamTournament(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const int threadsWithIdenticalWork = InterTeamThreadsPerBlock/InterTeamBlockDepthForward;
+  const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, InterTeamBlockDepthForward);
   
   const int B = X.size(1);
@@ -534,14 +532,14 @@ void ScheduleTeamTournament(
 
 torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
 {
-  auto constants = determineRotMatConstants(thetas.size(0), X.size(0));
+  auto rotMatConstants = determineRotMatConstants(thetas.size(0), X.size(0));
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
   
-  bool allThetasFitToOneTeam = ScheduleIndividualTournamentsWithinTeams(C, S, X, constants);
+  bool allThetasFitToOneTeam = ScheduleIndividualTournamentsWithinTeams(C, S, X, rotMatConstants);
   if (allThetasFitToOneTeam) return X;
-  
-  ScheduleTeamTournament(C, S, X, constants);
+  std::cout << "\nOVER HEEEERE" << allThetasFitToOneTeam << "\n";
+  ScheduleTeamTournament(C, S, X, rotMatConstants);
   
   return X;
 }
@@ -747,7 +745,7 @@ void ScheduleTeamTournamentForThetaGrads(
 
   if (allThetasFitToOneTeam) {return;}
 
-  const int threadsWithIdenticalWork = InterTeamThreadsPerBlock/InterTeamBlockDepthForward;
+  const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, InterTeamBlockDepthForward);
   
   const int B = UX.size(1);
@@ -786,7 +784,7 @@ void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const int threadsWithIdenticalWork = IntraTeamThreadsPerBlock/IntraTeamBlockDepthForward;
+  const int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, IntraTeamBlockDepthForward);
   
   const int B = UX.size(1);
@@ -794,9 +792,9 @@ void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
   const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0);
   const dim3 blocks(nBlocksX, nBlocksY);
 
-  std::cout << "number of players: " << Ntilde<< "\n";
-  std::cout << "IntraTeamBlockDepthForward: " << IntraTeamBlockDepthForward << "\n";
-  std::cout << "team count: " << nBlocksY << "\n";
+  //std::cout << "number of players: " << Ntilde<< "\n";
+  //std::cout << "IntraTeamBlockDepthForward: " << IntraTeamBlockDepthForward << "\n";
+  //std::cout << "team count: " << nBlocksY << "\n";
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
