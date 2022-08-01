@@ -15,7 +15,7 @@ dtype = torch.float32
 
 # To have same results
 torch.manual_seed(12)
-dispResults = False
+dispResults = True
 
 # SEQUENTIAL WILL TAKE FOREVER IF TEAM SIZE IS NOT SMALL, MAKE SURE TO CHANGE IT BEFORE TESTING
 Ns = [3, 32, 6, 15, 33]
@@ -29,23 +29,15 @@ Ms =Ns
 batch_sizes = [6, 15, 3,26,33]
 
 parameters = [[x] for x in Ns]
-parameters = [x + [m] for m in Ms for x in parameters]
+parameters = [x + [m] for m in Ms for x in parameters if  m <= x[0]]
 parameters = [x + [b] for b in batch_sizes for x in parameters]
 parameters = [x + [isId] for isId in [True, False] for x in parameters]
 parameters = [x + [rr] for rr in [True] for x in parameters]
 
-trialCount = 1
-
-for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1): 
+trialCount = 10
+for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1): 
     for i in range(1,trialCount+1):
-        if M > N: 
-            print("Test ", index, " try ", i, " M ", M, "is larger than N " )
-            continue
 
-        if N <= teamSize:
-            continue
-
-        K = N-M
         if isTeamRR:
             rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
         else:
@@ -111,12 +103,15 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
             print("thetaGrad:")
             print(thetas.grad)
 
+
         if dispResults:
             print("\n\n", index, "Comparison of custom and autodiff:\n---------------------------------")
             print("Max abs deviation of forwards: ")
             print(torch.absolute(Ucustom-UPyTorch).max())
             print("Max abs deviation of grads: ")
             print(torch.absolute(thetas.grad-gradCustom).max())
+
+            print(torch.isclose(thetas.grad, gradCustom))
 
         
         msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId) + " usingTeamRR: " + str(isTeamRR)
@@ -130,10 +125,13 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
         torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
         try:
             torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
-            print("Test ", index, " try ", i,  "passed!", msgInfo)
+            print("Test ", index, " try ", i,  "passed!")
+
+            break
         except AssertionError as e:
             print(e)
             assert torch.absolute(thetas.grad-gradCustom).max() < 3e-5
             print("Test ", index, " try ", i, " passed - with lower float accuracy!", msgInfo)
+
 
 print("All tests passed!")

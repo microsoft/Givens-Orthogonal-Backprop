@@ -142,8 +142,11 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                     GivMat[j,i] = sij
                     UPyTorch = GivMat.matmul(UPyTorch)
                     
-                    print("torch: ", i, j, "->", "S", round(sij.item(),6), "C: ", round(cij.item(),6))
+                    #print("torch: ", i, j, "->", "S", round(sij.item(),6), "C: ", round(cij.item(),6))
                     x += 1
     
     #print("theta count: ", x)
+
+    if x == 0:
+        thetas.grad = torch.zeros(thetas.size(0)) if not thetas.grad else thetas.grad
     return UPyTorch

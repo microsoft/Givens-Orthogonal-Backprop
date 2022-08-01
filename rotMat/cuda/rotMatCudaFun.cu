@@ -18,15 +18,14 @@
 #define ThreadsPerRowBackward 128
 
 // DELETE FORWARD SUFFIX, SAME FOR FORWARD AND BACKWARD
-#define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/256)
+#define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock / 4
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
 #define InterTeamBlockWidthForward (int)(InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward)
 
 // Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
-#define IntraTeamRRThreadsPerBlockForward (int)(MaximumThreadsPerBlock)
+#define IntraTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
 #define IntraTeamBlockDepthForward (int)(InterTeamBlockDepthForward/2)
 #define IntraTeamBlockWidthForward (int)(IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward)
-
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
 // https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error
@@ -128,7 +127,7 @@ template <typename scalar_t>
     volatile scalar_t* sdata, 
     int tid)
 {
-  if (ThreadsPerRowBackward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (ThreadsPerRowBackward >= 64) sdata[tid] += sdata[tid + 32];
   if (ThreadsPerRowBackward >= 32) sdata[tid] += sdata[tid + 16];
   if (ThreadsPerRowBackward >= 16) sdata[tid] += sdata[tid + 8];
   if (ThreadsPerRowBackward >= 8) sdata[tid] += sdata[tid + 4];
@@ -142,7 +141,7 @@ template <typename scalar_t>
     volatile scalar_t* sdata,
     int tid)
 {
-  if (IntraTeamRRThreadsPerBlockForward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (IntraTeamRRThreadsPerBlockForward >= 64) sdata[tid] += sdata[tid + 32];
   if (IntraTeamRRThreadsPerBlockForward >= 32) sdata[tid] += sdata[tid + 16];
   if (IntraTeamRRThreadsPerBlockForward >= 16) sdata[tid] += sdata[tid + 8];
   if (IntraTeamRRThreadsPerBlockForward >= 8) sdata[tid] += sdata[tid + 4];
@@ -155,7 +154,7 @@ template <typename scalar_t>
     volatile scalar_t* sdata, 
     int tid)
 {
-  if (InterTeamRRThreadsPerBlockForward >= 64)  sdata[tid] += sdata[tid + 32];
+  if (InterTeamRRThreadsPerBlockForward >= 64) sdata[tid] += sdata[tid + 32];
   if (InterTeamRRThreadsPerBlockForward >= 32) sdata[tid] += sdata[tid + 16];
   if (InterTeamRRThreadsPerBlockForward >= 16) sdata[tid] += sdata[tid + 8];
   if (InterTeamRRThreadsPerBlockForward >= 8) sdata[tid] += sdata[tid + 4];
@@ -381,12 +380,7 @@ template <typename scalar_t>
   }
 
   int playerCountInBlock = IntraTeamBlockDepthForward *2;
-  //if( k == 0 )  printf("init player count int block FORWARD: %d\n",  playerCountInBlock);
-
   int blockStart = playerCountInBlock * blockIdx.y;
-
-  //if( k == 0 )  printf("block start %d NTilde %d FORWARD: \n",  blockStart, Ntilde);
-
   if (playerCountInBlock > Ntilde-blockStart)
   {
     playerCountInBlock = Ntilde-blockStart;
@@ -401,15 +395,12 @@ template <typename scalar_t>
   int i, j, thetaIndex;
   scalar_t cij, sij, Xi, Xj;
   
-  //if( k == 0 )  printf("dummy id %d dMax %d  player count int block: %d\n", dummyIndex, dMax, playerCountInBlock);
   for (int tournamentStep=0; tournamentStep<=playerCountInBlock-2; tournamentStep++)
   {
     auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
     
-    //if( k == 0 ) printf("blockId %d thread id %d  tournamentStep: %d  i,j => %d %d INTRA FORWARD got one! ->  S %.6f C %.6f \n ",blockIdx.y, tidY, tournamentStep, i, j, sij, cij);
-
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
@@ -422,7 +413,6 @@ template <typename scalar_t>
     
     Xi = X[i][k];
     Xj = X[j][k];
-    //if( tid == 0 ) printf("%d %d got one! -> S %.6f C %.6f \n", i, j, sij, cij);
 
     X[i][k] = Xi*cij - Xj*sij;
     X[j][k] = Xi*sij + Xj*cij;
@@ -476,17 +466,12 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
     const scalar_t cij = C[thetaIndex];
     const scalar_t sij = S[thetaIndex];
 
-    if( col == 0 ) printf("%d %d FORWARD ->  S %.6f C %.6f \n ", i, j, sij, cij);
-
     // Apply Givens: Update U's offsets
     const scalar_t Xj = X[j][col];
-
-    //if( col == 0 ) printf("%d %d got one! ->  S %.6f C %.6f \n ", i, j, sij, cij);
 
     // must update uj before updating ui
     X[j][col] = Xi*sij + Xj*cij;
     Xi = Xi*cij - Xj*sij;
-
     __syncthreads();
   }
 
@@ -559,7 +544,7 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
   //bool allThetasFitToOneTeam = ScheduleIntraTeamTournaments(C, S, X, constants);
   //if (allThetasFitToOneTeam) return X;
   ScheduleInterTeamTournament(C, S, X, constants);
-  
+
   return X;
 }
 
@@ -579,15 +564,15 @@ template <typename scalar_t>
     const int dummyTeamIndex,
     const int tournamentStep)
 {
-  __shared__ scalar_t sAGridForBlock[InterTeamBlockDepthForward][InterTeamBlockWidthForward];
-  scalar_t* sA = sAGridForBlock[threadIdx.y];
+  //__shared__ scalar_t sAGridForBlock[InterTeamBlockDepthForward][InterTeamBlockWidthForward];
+  //scalar_t* sA = sAGridForBlock[threadIdx.y];
 
   // If transpose k works on rows; otherwise on columns
   const int k = threadIdx.x + blockDim.x*blockIdx.x;
   const int tid = threadIdx.x;
   if (k >= UX.size(1)) // do we need a tidyY check here?
   {
-    sA[tid] = 0;
+    //sA[tid] = 0;
     return;
   }
 
@@ -615,7 +600,7 @@ template <typename scalar_t>
     
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
-      sA[tid] = 0;
+      //sA[tid] = 0;
       __syncthreads();
       continue;
     }
@@ -623,8 +608,6 @@ template <typename scalar_t>
     thetaIndex = i*N - (i+2)*(i+1)/2 + j;
     cij = C[thetaIndex];
     sij = -1 * S[thetaIndex];
-
-    if( k == 0 ) printf("%d %d NACKWARD got one! ->  S %.6f C %.6f \n ", i, j, sij, cij);
 
     // Apply Givens: Update U's offsets
     UXj = UX[j][k];
@@ -639,10 +622,11 @@ template <typename scalar_t>
     UX[j][k] = newUXj; 
     G[j][k] = newGj;
 
-    sA[tid] = UXi * newGj - newUXj * Gi;
+    auto res = UXi * newGj - newUXj * Gi;
+    atomicAdd(&JVP[thetaIndex], res);
     __syncthreads();
 
-    // Reduce
+    /* Reduce
     if (InterTeamBlockWidthForward == 1024) {
       if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
     if (InterTeamBlockWidthForward >= 512) {
@@ -653,7 +637,7 @@ template <typename scalar_t>
       if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
     if (tid < 32) blockReduceAtBackwardInterTeamRR(sA, tid);
     
-    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
+    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);*/
   }
 
   UX[i][k] = UXi;
@@ -686,12 +670,7 @@ template <typename scalar_t>
   }
 
   int playerCountInBlock = IntraTeamBlockDepthForward *2;
-  //if( k == 0 )  printf("init player count in block BACKWARD: %d\n",  playerCountInBlock);
-
   int blockStart = playerCountInBlock * blockIdx.y;
-
-  //if( k == 0 )  printf("block start %d NTilde %d BACKWARD: \n",  blockStart, Ntilde);
-
   if (playerCountInBlock > Ntilde-blockStart)
   {
     playerCountInBlock = Ntilde-blockStart;
@@ -706,15 +685,11 @@ template <typename scalar_t>
   int i, j, thetaIndex;
   scalar_t cij, sij, UXi, UXj, newUXi, newUXj, Gi, Gj, newGi, newGj;
 
-  //if( k == 0 )  printf("\ndummy id %d dMax %d  player count int block: %d\n", dummyIndex, dMax, playerCountInBlock);
-
   for (int tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
   {
     auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
-
-    //if( k == 0 ) printf("blockId %d thread id %d tournamentStep: %d  i,j => %d %d INTRA NACKWARD got one! ->  S %.6f C %.6f \n ",blockIdx.y, tidY, tournamentStep, i, j, sij, cij);
 
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
@@ -777,7 +752,6 @@ void ScheduleInterTeamTournamentForThetaGrads(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
   
-  const int rotationCountPerRound = Ntilde/2;
   int teamCount = (Ntilde / InterTeamBlockDepthForward) + (Ntilde % InterTeamBlockDepthForward != 0);
   if (teamCount == 1)
   {
@@ -845,6 +819,5 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCudaTeamRR(
 
   ScheduleInterTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
   //ScheduleIntraTeamTournamentsForThetaGrads(C, S, UX, G, JVP, constants);
-  
   return std::make_pair(G, JVP);
 }
