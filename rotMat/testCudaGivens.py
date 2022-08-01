@@ -15,7 +15,7 @@ dtype = torch.float32
 
 # To have same results
 torch.manual_seed(12)
-dispResults = False
+dispResults = True
 
 # SEQUENTIAL WILL TAKE FOREVER IF TEAM SIZE IS NOT SMALL, MAKE SURE TO CHANGE IT BEFORE TESTING
 Ns = [3, 32, 6, 15, 33]
@@ -41,23 +41,26 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
             print("Test ", index, " try ", i, " M ", M, "is larger than N " )
             continue
 
-        K = N-M
+        if N <= teamSize or N!=M:
+            continue
+
+        G = torch.randn(N,batch).to(dtype).to(device)
+
         if isTeamRR:
             rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
         else:
-            rotUnit = GivensRotations.RotMat(N, M).to(device)
-            
+            rotUnit = GivensRotations.RotMat(N, M).to(device)   
         rotUnit.thetas.data = torch.randn(rotUnit.thetas.data.size()).to(device).requires_grad_(True)
-        thetas = torch.clone(rotUnit.thetas).detach().to(torch.device('cpu')).requires_grad_(True)
-
-        G = torch.randn(N,batch).to(dtype).to(device)
 
         if XisId:
             X = torch.eye(N, batch).to(dtype).to(device).requires_grad_(True)
         else:
             X = torch.randn(N, batch).to(dtype).to(device).requires_grad_(True)
         
-        UPyTorch = torch.clone(X).to('cpu').requires_grad_(True)
+        # for comparison
+        thetas = torch.clone(rotUnit.thetas).detach()
+        UPyTorch = torch.clone(X)
+        
 
         startFwd = torch.cuda.Event(enable_timing=True)
         endFwd = torch.cuda.Event(enable_timing=True)
@@ -79,9 +82,9 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
         backwardMilliseconds = startBck.elapsed_time(endBck)
         if dispResults:
             print( '(In ms) Forward time: {0:.3f} | Backward time: {1:.3f}'.format(forwardMilliseconds,backwardMilliseconds) ) # milliseconds
+        
         gradCustom = rotUnit.thetas.grad.to(torch.device('cpu')).requires_grad_(True)
         Ucustom = Ucustom.to(torch.device('cpu'))
-
         if dispResults:
             print("\n\n", index, "Custom result:")
             print("U:")
@@ -91,13 +94,14 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
 
         tstart = time.time()
         UPyTorch = sequentialGivens(UPyTorch, thetas, M, isTeamRR, teamSize)
-
-        G = G.to(torch.device('cpu'))
         loss = (G*UPyTorch).sum()
         loss.backward()
 
         if dispResults:
             print(" (in seconds) torch time: "+str(time.time()-tstart))
+
+        UPyTorch = UPyTorch.to('cpu').requires_grad_(True)
+        thetas = thetas.to(torch.device('cpu')).requires_grad_(True)
 
         if dispResults:
             print(index, "Torch autodiff result:")

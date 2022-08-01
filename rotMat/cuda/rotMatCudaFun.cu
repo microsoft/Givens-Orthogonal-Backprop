@@ -19,7 +19,7 @@
 
 // DELETE FORWARD SUFFIX, SAME FOR FORWARD AND BACKWARD
 #define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/256)
 #define InterTeamBlockWidthForward (int)(InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward)
 
 // Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
@@ -110,27 +110,16 @@ std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int 
   return std::make_tuple(dMax, dummyIndex, Ntilde);
 }
 
-const dim3 prepareBlocksForIntraTournament(const int B, const int &Ntilde)
+const dim3 prepareBlocksForTournament(const int B, const int &Ntilde, const int &width, const int &depth )
 {
-  const int nBlocksX = (B/IntraTeamBlockWidthForward) + (B % IntraTeamBlockWidthForward != 0);
+  const int nBlocksX = (B/width) + (B % width != 0);
   
   const int rotationsPerRound = Ntilde/2;
-  const int nBlocksY = (rotationsPerRound / IntraTeamBlockDepthForward) + (rotationsPerRound % IntraTeamBlockDepthForward != 0); 
+  const int nBlocksY = (rotationsPerRound / depth) + (rotationsPerRound % depth != 0); 
   
   const dim3 blocks(nBlocksX, nBlocksY);
   return blocks;
 }
-
-/*const dim3 prepareBlocksForInterTournament(const int B, const int &Ntilde)
-{
-  const int nBlocksX = (B/IntraTeamBlockWidthForward) + (B % IntraTeamBlockWidthForward != 0);
-  
-  const int rotationsPerRound = Ntilde/2;
-  const int nBlocksY = (rotationsPerRound / IntraTeamBlockDepthForward) + (rotationsPerRound % IntraTeamBlockDepthForward != 0); 
-  
-  const dim3 blocks(nBlocksX, nBlocksY);
-  return blocks;
-}*/
 
 
 
@@ -513,7 +502,7 @@ bool ScheduleIntraTeamTournaments(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const dim3 blocks = prepareBlocksForIntraTournament(X.size(1), Ntilde);
+  const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
   const dim3 threads(IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
 
   AT_DISPATCH_FLOATING_TYPES(
@@ -537,14 +526,9 @@ void ScheduleInterTeamTournament(
   auto dMax = std::get<0>(rotMatConstants);
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
-
-  const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
-  const dim3 threads(threadsWithIdenticalWork, InterTeamBlockDepthForward);
   
-  const int B = X.size(1);
-  const int nBlocksX = (B/threadsWithIdenticalWork) + (B%threadsWithIdenticalWork != 0);
-  const int nBlocksY = ((Ntilde / 2)/InterTeamBlockDepthForward) + ((Ntilde / 2)% InterTeamBlockDepthForward != 0);
-  const dim3 blocks(nBlocksX, nBlocksY);
+  const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, InterTeamBlockWidthForward, InterTeamBlockDepthForward);
+  const dim3 threads(InterTeamBlockWidthForward, InterTeamBlockDepthForward);
 
   int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
   const int dummyTeamIndex = teamCount;
@@ -570,9 +554,9 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
   
-  bool allThetasFitToOneTeam = ScheduleIntraTeamTournaments(C, S, X, constants);
-  if (allThetasFitToOneTeam) return X;
-  //ScheduleInterTeamTournament(C, S, X, rotMatConstants);
+  //bool allThetasFitToOneTeam = ScheduleIntraTeamTournaments(C, S, X, constants);
+  //if (allThetasFitToOneTeam) return X;
+  ScheduleInterTeamTournament(C, S, X, constants);
   
   return X;
 }
@@ -581,7 +565,7 @@ torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
 // USING THE TEAM ROUND ROBIN TOURNAMENT FOR SEQUENCING GIVENS ROTATIONS
 
 template <typename scalar_t> 
-  __global__ void PlayThetaGradTeamTournamentMatch(
+  __global__ void PlayTeamTournamentMatchForThetaGrad(
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
@@ -608,7 +592,6 @@ template <typename scalar_t>
   auto matchedTeams = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
   if (matchedTeams.second == dummyTeamIndex)  return;
 
-  //printf("HERE AT PlayThetaGradTeamTournamentMatch");
   const int playerCountPerTeam = blockDim.y;
   const int i =  playerCountPerTeam * matchedTeams.first + threadIdx.y; // home team
   scalar_t UXi = UX[i][k];
@@ -798,24 +781,18 @@ void ScheduleInterTeamTournamentForThetaGrads(
   {
     return;
   }
-
-  const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
-  const dim3 threads(threadsWithIdenticalWork, InterTeamBlockDepthForward);
-  
-  const int B = UX.size(1);
-  const int nBlocksX = (B / threadsWithIdenticalWork) + (B % threadsWithIdenticalWork != 0);
-  const int nBlocksY = (rotationCountPerRound / InterTeamBlockDepthForward) + (rotationCountPerRound % InterTeamBlockDepthForward != 0);
-  const dim3 blocks(nBlocksX, nBlocksY);
-
   const int dummyTeamIndex = teamCount;
   incrementIfNotEven(teamCount);
+
+  const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, InterTeamBlockWidthForward, InterTeamBlockDepthForward);
+  const dim3 threads(InterTeamBlockWidthForward, InterTeamBlockDepthForward);
   
   for (int tournamentStep=0; tournamentStep<=teamCount-2; tournamentStep++)
   {
     AT_DISPATCH_FLOATING_TYPES(
       C.type(),
       "rotMatForwardCuda",
-      ([&]{ PlayThetaGradTeamTournamentMatch<scalar_t><<<blocks,threads>>>(
+      ([&]{ PlayTeamTournamentMatchForThetaGrad<scalar_t><<<blocks,threads>>>(
         UX.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
         G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
         C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
@@ -837,7 +814,7 @@ void ScheduleIntraTeamTournamentsForThetaGrads(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const dim3 blocks = prepareBlocksForIntraTournament(UX.size(1), Ntilde);
+  const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
   const dim3 threads(IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
 
   AT_DISPATCH_FLOATING_TYPES(
@@ -864,8 +841,8 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCudaTeamRR(
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  //ScheduleInterTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
-  ScheduleIntraTeamTournamentsForThetaGrads(C, S, UX, G, JVP, constants);
+  ScheduleInterTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
+  //ScheduleIntraTeamTournamentsForThetaGrads(C, S, UX, G, JVP, constants);
   
   return std::make_pair(G, JVP);
 }
