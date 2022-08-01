@@ -15,7 +15,7 @@ dtype = torch.float32
 
 # To have same results
 torch.manual_seed(12)
-dispResults = True
+dispResults = False
 
 # SEQUENTIAL WILL TAKE FOREVER IF TEAM SIZE IS NOT SMALL, MAKE SURE TO CHANGE IT BEFORE TESTING
 Ns = [3, 32, 6, 15, 33]
@@ -35,32 +35,33 @@ parameters = [x + [isId] for isId in [True, False] for x in parameters]
 parameters = [x + [rr] for rr in [True] for x in parameters]
 
 trialCount = 1
+
 for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1): 
     for i in range(1,trialCount+1):
         if M > N: 
             print("Test ", index, " try ", i, " M ", M, "is larger than N " )
             continue
 
-        if N <= teamSize or N!=M:
+        if N <= teamSize:
             continue
 
-        G = torch.randn(N,batch).to(dtype).to(device)
-
+        K = N-M
         if isTeamRR:
             rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
         else:
-            rotUnit = GivensRotations.RotMat(N, M).to(device)   
+            rotUnit = GivensRotations.RotMat(N, M).to(device)
+            
         rotUnit.thetas.data = torch.randn(rotUnit.thetas.data.size()).to(device).requires_grad_(True)
+        thetas = torch.clone(rotUnit.thetas).detach().to(torch.device('cpu')).requires_grad_(True)
+
+        G = torch.randn(N,batch).to(dtype).to(device)
 
         if XisId:
             X = torch.eye(N, batch).to(dtype).to(device).requires_grad_(True)
         else:
             X = torch.randn(N, batch).to(dtype).to(device).requires_grad_(True)
         
-        # for comparison
-        thetas = torch.clone(rotUnit.thetas).detach()
-        UPyTorch = torch.clone(X)
-        
+        UPyTorch = torch.clone(X).to('cpu').requires_grad_(True)
 
         startFwd = torch.cuda.Event(enable_timing=True)
         endFwd = torch.cuda.Event(enable_timing=True)
@@ -82,31 +83,31 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
         backwardMilliseconds = startBck.elapsed_time(endBck)
         if dispResults:
             print( '(In ms) Forward time: {0:.3f} | Backward time: {1:.3f}'.format(forwardMilliseconds,backwardMilliseconds) ) # milliseconds
-        
         gradCustom = rotUnit.thetas.grad.to(torch.device('cpu')).requires_grad_(True)
         Ucustom = Ucustom.to(torch.device('cpu'))
+
         if dispResults:
             print("\n\n", index, "Custom result:")
-            print("U:")
-            print(Ucustom)
+            #print("U:")
+            #print(Ucustom)
             print("thetaGrad:")
             print(gradCustom)
+            print()
 
         tstart = time.time()
         UPyTorch = sequentialGivens(UPyTorch, thetas, M, isTeamRR, teamSize)
+
+        G = G.to(torch.device('cpu'))
         loss = (G*UPyTorch).sum()
         loss.backward()
 
         if dispResults:
             print(" (in seconds) torch time: "+str(time.time()-tstart))
 
-        UPyTorch = UPyTorch.to('cpu').requires_grad_(True)
-        thetas = thetas.to(torch.device('cpu')).requires_grad_(True)
-
         if dispResults:
             print(index, "Torch autodiff result:")
-            print("UPyTorch:")
-            print(UPyTorch)
+            #print("UPyTorch:")
+            #print(UPyTorch)
             print("thetaGrad:")
             print(thetas.grad)
 
@@ -120,9 +121,9 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters, start=1):
         
         msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId) + " usingTeamRR: " + str(isTeamRR)
         if  N == batch and XisId:
-            if dispResults: 
+            #if dispResults: 
                 #rint("UPyTorch\n",torch.round(UPyTorch @ UPyTorch.t()), "\nDETERMINANT:\n",torch.det(UPyTorch))
-                print("UCUSTOM\n",torch.round(Ucustom @ Ucustom.t()), "\nDETERMINANT:\n",torch.det(Ucustom)) 
+                #print("UCUSTOM\n",torch.round(Ucustom @ Ucustom.t()), "\nDETERMINANT:\n",torch.det(Ucustom)) 
             torch.testing.assert_close(Ucustom @ Ucustom.t(), torch.eye(N, N), rtol=1, atol=1, msg=msgInfo)
 
             

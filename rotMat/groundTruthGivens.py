@@ -3,11 +3,6 @@ import time
 import numpy as np
 from math import ceil
 
-
-device = torch.device('cuda')
-dtype = torch.float32
-
-
 def sequentialGivens(UPyTorch, thetas, M, isTeamRR, playerCountInTeam):
     if isTeamRR:
         return sequentialGivensTeamRR(UPyTorch, thetas, M, playerCountInTeam)
@@ -51,7 +46,7 @@ def sequentialGivensCircleMethod(UPyTorch, thetas, M):
             cij = torch.cos(thetas[thetaIndx])
             sij = torch.sin(thetas[thetaIndx])
 
-            GivMat = torch.eye(N).to(dtype).to(device)
+            GivMat = torch.eye(N)
             GivMat[i,i] = cij
             GivMat[j,j] = cij
             GivMat[i,j] = -sij
@@ -115,7 +110,7 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
         teamCount += 1
 
 
-    '''blocksCount = int(Ntilde/2/teamSize) + int(Ntilde/2 % teamSize != 0)
+    blocksCount = int(Ntilde/2/teamSize) + int(Ntilde/2 % teamSize != 0)
     for teamTournamentStep in range(teamCount-1-1,-1,-1):
         for blockIndx in range(blocksCount):
             team_i, team_j = getRowIndexPair(blockIndx, teamCount, teamTournamentStep)
@@ -140,7 +135,7 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                     cij = torch.cos(thetas[thetaIndx])
                     sij = torch.sin(thetas[thetaIndx])
 
-                    GivMat = torch.eye(N).to(dtype).to(device)
+                    GivMat = torch.eye(N)
                     GivMat[i,i] = cij
                     GivMat[j,j] = cij
                     GivMat[i,j] = -sij
@@ -148,7 +143,7 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                     UPyTorch = GivMat.matmul(UPyTorch)
                     
                     print("torch: ", i, j, "->", "S", round(sij.item(),6), "C: ", round(cij.item(),6))
-                    x += 1'''
+                    x += 1
     
     #print("theta count: ", x)
     return UPyTorch

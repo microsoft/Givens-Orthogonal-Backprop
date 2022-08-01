@@ -476,6 +476,8 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
     const scalar_t cij = C[thetaIndex];
     const scalar_t sij = S[thetaIndex];
 
+    if( col == 0 ) printf("%d %d FORWARD ->  S %.6f C %.6f \n ", i, j, sij, cij);
+
     // Apply Givens: Update U's offsets
     const scalar_t Xj = X[j][col];
 
@@ -598,12 +600,12 @@ template <typename scalar_t>
   scalar_t Gi = G[i][k];
 
   const int jStart = playerCountPerTeam * matchedTeams.second; //visiting team
-  const int jEnd = jStart + playerCountPerTeam;
+  //const int jEnd = jStart + playerCountPerTeam;
   int j = jStart + threadIdx.y - 1;
   
   const int N = UX.size(0);
   int thetaIndex;
-  scalar_t cij, sij, UXj, newUXi, newUXj, Gj, newGi, newGj;
+  scalar_t cij, sij, UXj, newUXj, Gj, newGj;
   for (int step =0; step < playerCountPerTeam; step++, j--)
   {
     if (j < jStart)
@@ -620,28 +622,27 @@ template <typename scalar_t>
 
     thetaIndex = i*N - (i+2)*(i+1)/2 + j;
     cij = C[thetaIndex];
-    sij = -S[thetaIndex];
+    sij = -1 * S[thetaIndex];
 
-    //if( k == 0 ) printf("%d %d NACKWARD got one! ->  S %.6f C %.6f \n ", i, j, sij, cij);
+    if( k == 0 ) printf("%d %d NACKWARD got one! ->  S %.6f C %.6f \n ", i, j, sij, cij);
 
     // Apply Givens: Update U's offsets
     UXj = UX[j][k];
-    newUXj = UXi*sij + UXj*cij; // must update j before updating i
-    UXi = UXi*cij - UXj*sij; 
+    newUXj = UXi*sij + UXj*cij;
 
     Gj = G[j][k];
-    newGj = Gi*sij + Gj*cij; // must update j before updating i
+    newGj = Gi*sij + Gj*cij; 
+
+    UXi = UXi*cij - UXj*sij; 
     Gi = Gi*cij - Gj*sij;
 
     UX[j][k] = newUXj; 
     G[j][k] = newGj;
 
-    auto res = newUXi * newGj - newUXj * newGi;
-    sA[tid] = res;
-    atomicAdd(&JVP[thetaIndex], res);
+    sA[tid] = UXi * newGj - newUXj * Gi;
     __syncthreads();
 
-    /* Reduce
+    // Reduce
     if (InterTeamBlockWidthForward == 1024) {
       if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
     if (InterTeamBlockWidthForward >= 512) {
@@ -652,10 +653,11 @@ template <typename scalar_t>
       if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
     if (tid < 32) blockReduceAtBackwardInterTeamRR(sA, tid);
     
-    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);*/
+    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 
   UX[i][k] = UXi;
+  G[i][k] = Gi;
 }
 
 
