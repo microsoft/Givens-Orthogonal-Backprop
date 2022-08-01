@@ -9,18 +9,18 @@
 #include <functional>
 #include <vector>
 
-using namespace torch::indexing;
+//using namespace torch::indexing;
 
 #define MaximumThreadsPerBlock 1024
 #define WarpSize 32
 
-#define ThreadsPerRowForward 128
-#define ThreadsPerRowBackward 256
+#define ThreadsPerRowForward 64
+#define ThreadsPerRowBackward 128
 
+// DELETE FORWARD SUFFIX, SAME FOR FORWARD AND BACKWARD
 #define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/256)
+#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
 #define InterTeamBlockWidthForward (int)(InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward)
-
 
 // Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
 #define IntraTeamRRThreadsPerBlockForward (int)(MaximumThreadsPerBlock)
@@ -86,13 +86,11 @@ __device__ __forceinline__ bool areRowIndicesOutOfRange(
   return j >= firstDummyIndex || (i > dMax && j > dMax);
 }
 
-void addDummyIndexIfNotEven(int &Ntilde, int &dummyIndex)
+void incrementIfNotEven(int &Ntilde)
 {
-  dummyIndex = Ntilde;
   if (Ntilde % 2 != 0)
   {
     Ntilde += 1;
-    dummyIndex = Ntilde-1;
   }
 }
 
@@ -105,16 +103,39 @@ std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int 
   }
 
   // Handle odd N; in that case Ntilde is the even augmented dimension
-  int dummyIndex;
   int Ntilde = N;
-  addDummyIndexIfNotEven(Ntilde, dummyIndex);
+  const int dummyIndex = Ntilde;
+  incrementIfNotEven(Ntilde);
 
   return std::make_tuple(dMax, dummyIndex, Ntilde);
 }
 
+const dim3 prepareBlocksForIntraTournament(const int B, const int &Ntilde)
+{
+  const int nBlocksX = (B/IntraTeamBlockWidthForward) + (B % IntraTeamBlockWidthForward != 0);
+  
+  const int rotationsPerRound = Ntilde/2;
+  const int nBlocksY = (rotationsPerRound / IntraTeamBlockDepthForward) + (rotationsPerRound % IntraTeamBlockDepthForward != 0); 
+  
+  const dim3 blocks(nBlocksX, nBlocksY);
+  return blocks;
+}
+
+/*const dim3 prepareBlocksForInterTournament(const int B, const int &Ntilde)
+{
+  const int nBlocksX = (B/IntraTeamBlockWidthForward) + (B % IntraTeamBlockWidthForward != 0);
+  
+  const int rotationsPerRound = Ntilde/2;
+  const int nBlocksY = (rotationsPerRound / IntraTeamBlockDepthForward) + (rotationsPerRound % IntraTeamBlockDepthForward != 0); 
+  
+  const dim3 blocks(nBlocksX, nBlocksY);
+  return blocks;
+}*/
+
+
 
 template <typename scalar_t>
-  __device__ void warpReduceAtBackward(
+  __device__ void blockReduceAtBackward(
     volatile scalar_t* sdata, 
     int tid)
 {
@@ -128,7 +149,7 @@ template <typename scalar_t>
 
 
 template <typename scalar_t>
-  __device__ void warpReduceAtBackwardIntraTeamRR(
+  __device__ void blockReduceAtBackwardIntraTeamRR(
     volatile scalar_t* sdata,
     int tid)
 {
@@ -141,7 +162,7 @@ template <typename scalar_t>
 }
 
 template <typename scalar_t>
-  __device__ void warpReduceAtBackwardInterTeamRR(
+  __device__ void blockReduceAtBackwardInterTeamRR(
     volatile scalar_t* sdata, 
     int tid)
 {
@@ -204,7 +225,7 @@ torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
 
-  const int nBlocksY = X.size(0)/ThreadsPerRowForward + (X.size(0)% ThreadsPerRowForward != 0);
+  const int nBlocksY = X.size(1)/ThreadsPerRowForward + (X.size(1)% ThreadsPerRowForward != 0);
   const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowForward);
 
@@ -300,7 +321,7 @@ template <typename scalar_t>
     if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
   if (ThreadsPerRowBackward >= 128) {
     if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if(tid < 32) warpReduceAtBackward(sA, tid);
+  if(tid < 32) blockReduceAtBackward(sA, tid);
   
   if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
@@ -310,8 +331,8 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor UX,
   torch::Tensor G)
 {
-  auto N = UX.size(0);
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
+
+  auto rotMatConstants = determineRotMatConstants(thetas.size(0), UX.size(0));
   auto dMax = std::get<0>(rotMatConstants);
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
@@ -322,7 +343,8 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  const int nBlocksY = N/ThreadsPerRowBackward + (N % ThreadsPerRowBackward != 0);
+  auto B = UX.size(1);
+  const int nBlocksY = B/ThreadsPerRowBackward + (B % ThreadsPerRowBackward != 0);
   const dim3 blocks(Ntilde / 2, nBlocksY);
   const dim3 threads(1, ThreadsPerRowBackward);
 
@@ -351,7 +373,7 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
 // USING THE TEAM ROUND ROBIN TOURNAMENT FOR SEQUENCING GIVENS ROTATIONS
 
 template <typename scalar_t>
-  __global__ void PlayIndividualTournamentWithinTeams(
+  __global__ void PlayIntraTeamTournament(
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> X,
@@ -363,32 +385,48 @@ template <typename scalar_t>
   const int tid = threadIdx.x;
   const int tidY = threadIdx.y;
   const int k = tid + blockDim.x*blockIdx.x; 
-  if (k >= X.size(1) || tidY*2 >= Ntilde)
+
+  if (k >= X.size(1))
   {
     return;
   }
 
   int playerCountInBlock = IntraTeamBlockDepthForward *2;
+  //if( k == 0 )  printf("init player count int block FORWARD: %d\n",  playerCountInBlock);
+
   int blockStart = playerCountInBlock * blockIdx.y;
+
+  //if( k == 0 )  printf("block start %d NTilde %d FORWARD: \n",  blockStart, Ntilde);
+
   if (playerCountInBlock > Ntilde-blockStart)
   {
     playerCountInBlock = Ntilde-blockStart;
   }
 
+  if (tidY*2 >= playerCountInBlock)
+  {
+    return;
+  }
+
   const int N = X.size(0);
   int i, j, thetaIndex;
   scalar_t cij, sij, Xi, Xj;
+  
+  //if( k == 0 )  printf("dummy id %d dMax %d  player count int block: %d\n", dummyIndex, dMax, playerCountInBlock);
   for (int tournamentStep=0; tournamentStep<=playerCountInBlock-2; tournamentStep++)
   {
     auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
     
+    //if( k == 0 ) printf("blockId %d thread id %d  tournamentStep: %d  i,j => %d %d INTRA FORWARD got one! ->  S %.6f C %.6f \n ",blockIdx.y, tidY, tournamentStep, i, j, sij, cij);
+
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
       __syncthreads();
       continue;
     }
+
     thetaIndex = i*N - (i+2)*(i+1)/2 + j;
     cij = C[thetaIndex];
     sij = S[thetaIndex];
@@ -465,7 +503,7 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
 }
 
 
-bool ScheduleIndividualTournamentsWithinTeams(
+bool ScheduleIntraTeamTournaments(
   torch::Tensor C, 
   torch::Tensor S, 
   torch::Tensor X,
@@ -475,27 +513,22 @@ bool ScheduleIndividualTournamentsWithinTeams(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
-  const dim3 threads(threadsWithIdenticalWork, IntraTeamBlockDepthForward);
-
-  const int B = X.size(1);
-  const int nBlocksX = (B/threadsWithIdenticalWork) + (B %threadsWithIdenticalWork != 0);
-  const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0); 
-  const dim3 blocks(nBlocksX, nBlocksY);
+  const dim3 blocks = prepareBlocksForIntraTournament(X.size(1), Ntilde);
+  const dim3 threads(IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
     "rotMatForwardCuda",
-    ([&]{ PlayIndividualTournamentWithinTeams<scalar_t><<<blocks,threads>>>(
+    ([&]{ PlayIntraTeamTournament<scalar_t><<<blocks,threads>>>(
       C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       S.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
       X.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
       Ntilde, dummyIndex, dMax);}));
 
-  return nBlocksY == 1;
+  return blocks.y == 1;
 }
 
-void ScheduleTeamTournament(
+void ScheduleInterTeamTournament(
   torch::Tensor C, 
   torch::Tensor S, 
   torch::Tensor X,
@@ -514,8 +547,8 @@ void ScheduleTeamTournament(
   const dim3 blocks(nBlocksX, nBlocksY);
 
   int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
-  int dummyTeamIndex = -1;
-  addDummyIndexIfNotEven(teamCount,dummyTeamIndex);
+  const int dummyTeamIndex = teamCount;
+  incrementIfNotEven(teamCount);
   
   for (int tournamentStep=teamCount-2; tournamentStep>=0; tournamentStep--)
   {
@@ -533,13 +566,13 @@ void ScheduleTeamTournament(
 
 torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
 {
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), X.size(0));
+  auto constants = determineRotMatConstants(thetas.size(0), X.size(0));
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
   
-  bool allThetasFitToOneTeam = ScheduleIndividualTournamentsWithinTeams(C, S, X, rotMatConstants);
+  bool allThetasFitToOneTeam = ScheduleIntraTeamTournaments(C, S, X, constants);
   if (allThetasFitToOneTeam) return X;
-  ScheduleTeamTournament(C, S, X, rotMatConstants);
+  //ScheduleInterTeamTournament(C, S, X, rotMatConstants);
   
   return X;
 }
@@ -560,13 +593,13 @@ template <typename scalar_t>
     const int dummyTeamIndex,
     const int tournamentStep)
 {
-  __shared__ scalar_t sAPerRow[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
-  scalar_t* sA = sAPerRow[threadIdx.y];
+  __shared__ scalar_t sAGridForBlock[InterTeamBlockDepthForward][InterTeamBlockWidthForward];
+  scalar_t* sA = sAGridForBlock[threadIdx.y];
 
   // If transpose k works on rows; otherwise on columns
   const int k = threadIdx.x + blockDim.x*blockIdx.x;
   const int tid = threadIdx.x;
-  if (k >= UX.size(1))
+  if (k >= UX.size(1)) // do we need a tidyY check here?
   {
     sA[tid] = 0;
     return;
@@ -575,6 +608,7 @@ template <typename scalar_t>
   auto matchedTeams = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
   if (matchedTeams.second == dummyTeamIndex)  return;
 
+  //printf("HERE AT PlayThetaGradTeamTournamentMatch");
   const int playerCountPerTeam = blockDim.y;
   const int i =  playerCountPerTeam * matchedTeams.first + threadIdx.y; // home team
   scalar_t UXi = UX[i][k];
@@ -582,16 +616,16 @@ template <typename scalar_t>
 
   const int jStart = playerCountPerTeam * matchedTeams.second; //visiting team
   const int jEnd = jStart + playerCountPerTeam;
-  int j = jStart + threadIdx.y;
+  int j = jStart + threadIdx.y - 1;
   
   const int N = UX.size(0);
   int thetaIndex;
   scalar_t cij, sij, UXj, newUXi, newUXj, Gj, newGi, newGj;
-  for (int step =0; step < playerCountPerTeam; step++, j++)
+  for (int step =0; step < playerCountPerTeam; step++, j--)
   {
-    if (j >= jEnd)
+    if (j < jStart)
     {
-      j -= playerCountPerTeam;
+      j += playerCountPerTeam;
     }
     
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
@@ -605,6 +639,8 @@ template <typename scalar_t>
     cij = C[thetaIndex];
     sij = -S[thetaIndex];
 
+    //if( k == 0 ) printf("%d %d NACKWARD got one! ->  S %.6f C %.6f \n ", i, j, sij, cij);
+
     // Apply Givens: Update U's offsets
     UXj = UX[j][k];
     newUXj = UXi*sij + UXj*cij; // must update j before updating i
@@ -617,10 +653,12 @@ template <typename scalar_t>
     UX[j][k] = newUXj; 
     G[j][k] = newGj;
 
-    sA[tid] = newUXi * newGj - newUXj * newGi;
+    auto res = newUXi * newGj - newUXj * newGi;
+    sA[tid] = res;
+    atomicAdd(&JVP[thetaIndex], res);
     __syncthreads();
 
-    // Reduce
+    /* Reduce
     if (InterTeamBlockWidthForward == 1024) {
       if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
     if (InterTeamBlockWidthForward >= 512) {
@@ -629,9 +667,9 @@ template <typename scalar_t>
       if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
     if (InterTeamBlockWidthForward >= 128) {
       if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-    if (tid < 32) warpReduceAtBackwardInterTeamRR(sA, tid);
+    if (tid < 32) blockReduceAtBackwardInterTeamRR(sA, tid);
     
-    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
+    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);*/
   }
 
   UX[i][k] = UXi;
@@ -639,46 +677,59 @@ template <typename scalar_t>
 
 
 template <typename scalar_t> 
-  __global__ void PlayThetaGradTournamentWithinTeams(
+  __global__ void PlayIntraTeamTournamentsForThetaGrad(
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> UX,
     at::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> G,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> C,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> S,
     at::PackedTensorAccessor32<scalar_t, 1, torch::RestrictPtrTraits> JVP,
-    const int dummyIndex,
     const int Ntilde,
+    const int dummyIndex,
     const int dMax)
 {
-  __shared__ scalar_t sAPerRow[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
-  
+  __shared__ scalar_t sAGridForBlock[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
   const int tidY = threadIdx.y;
-  scalar_t* sA = sAPerRow[tidY];
-
+  scalar_t* sA = sAGridForBlock[tidY];
+  
   // k is the column index of M and the row index of Uf, to set col of A
   const int tid = threadIdx.x;
   const int k = tid + blockDim.x*blockIdx.x; 
-  if (k >= UX.size(1) || k*2 >= Ntilde)
+  if (k >= UX.size(1))
   {
     sA[tid] = 0;
     return;
   }
 
   int playerCountInBlock = IntraTeamBlockDepthForward *2;
+  //if( k == 0 )  printf("init player count in block BACKWARD: %d\n",  playerCountInBlock);
+
   int blockStart = playerCountInBlock * blockIdx.y;
+
+  //if( k == 0 )  printf("block start %d NTilde %d BACKWARD: \n",  blockStart, Ntilde);
 
   if (playerCountInBlock > Ntilde-blockStart)
   {
     playerCountInBlock = Ntilde-blockStart;
   }
 
+  if (tidY*2 >= playerCountInBlock)
+  {
+    return;
+  }
+
   const int N = UX.size(0);
   int i, j, thetaIndex;
   scalar_t cij, sij, UXi, UXj, newUXi, newUXj, Gi, Gj, newGi, newGj;
+
+  //if( k == 0 )  printf("\ndummy id %d dMax %d  player count int block: %d\n", dummyIndex, dMax, playerCountInBlock);
+
   for (int tournamentStep=playerCountInBlock-2; tournamentStep>=0; tournamentStep--)
   {
     auto rowIndices = determineRowIndexPair(tidY, playerCountInBlock, tournamentStep);
     i = blockStart + rowIndices.first;
     j = blockStart + rowIndices.second;
+
+    //if( k == 0 ) printf("blockId %d thread id %d tournamentStep: %d  i,j => %d %d INTRA NACKWARD got one! ->  S %.6f C %.6f \n ",blockIdx.y, tidY, tournamentStep, i, j, sij, cij);
 
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
@@ -689,8 +740,9 @@ template <typename scalar_t>
 
     thetaIndex = i*N - (i+2)*(i+1)/2 + j;
     cij = C[thetaIndex];
-    sij = -S[thetaIndex]; // Transpose of a Givens rotation has the signs of sij flipped
-    
+    sij = -1 * S[thetaIndex]; // Transpose of a Givens rotation has the signs of sij flipped
+
+
     Gi = G[i][k];
     Gj = G[j][k];
 
@@ -721,14 +773,14 @@ template <typename scalar_t>
       if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
     if (IntraTeamBlockWidthForward >= 128) {
       if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-    if (tid < 32) warpReduceAtBackwardIntraTeamRR(sA, tid);
+    if (tid < 32) blockReduceAtBackwardIntraTeamRR(sA, tid);
     
     if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 }
 
 
-void ScheduleTeamTournamentForThetaGrads(
+void ScheduleInterTeamTournamentForThetaGrads(
   torch::Tensor C, 
   torch::Tensor S, 
   torch::Tensor UX,
@@ -741,9 +793,11 @@ void ScheduleTeamTournamentForThetaGrads(
   auto Ntilde = std::get<2>(rotMatConstants);
   
   const int rotationCountPerRound = Ntilde/2;
-  bool allThetasFitToOneTeam = (rotationCountPerRound/IntraTeamBlockDepthForward) + (rotationCountPerRound % IntraTeamBlockDepthForward != 0);
-
-  if (allThetasFitToOneTeam) {return;}
+  int teamCount = (Ntilde / InterTeamBlockDepthForward) + (Ntilde % InterTeamBlockDepthForward != 0);
+  if (teamCount == 1)
+  {
+    return;
+  }
 
   const int threadsWithIdenticalWork = InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward;
   const dim3 threads(threadsWithIdenticalWork, InterTeamBlockDepthForward);
@@ -753,11 +807,10 @@ void ScheduleTeamTournamentForThetaGrads(
   const int nBlocksY = (rotationCountPerRound / InterTeamBlockDepthForward) + (rotationCountPerRound % InterTeamBlockDepthForward != 0);
   const dim3 blocks(nBlocksX, nBlocksY);
 
-  int teamCount = (Ntilde / InterTeamBlockDepthForward) + (Ntilde % InterTeamBlockDepthForward != 0);
-  int dummyTeamIndex = -1;
-  addDummyIndexIfNotEven(teamCount,dummyTeamIndex);
+  const int dummyTeamIndex = teamCount;
+  incrementIfNotEven(teamCount);
   
-  for (int tournamentStep=0; tournamentStep<=teamCount-2; tournamentStep--)
+  for (int tournamentStep=0; tournamentStep<=teamCount-2; tournamentStep++)
   {
     AT_DISPATCH_FLOATING_TYPES(
       C.type(),
@@ -772,7 +825,7 @@ void ScheduleTeamTournamentForThetaGrads(
   }
 }
 
-void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
+void ScheduleIntraTeamTournamentsForThetaGrads(
   torch::Tensor C, 
   torch::Tensor S, 
   torch::Tensor UX,
@@ -784,18 +837,13 @@ void ScheduleIndividualTournamentsWithinTeamsForThetaGrads(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const int threadsWithIdenticalWork = IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward;
-  const dim3 threads(threadsWithIdenticalWork, IntraTeamBlockDepthForward);
-  
-  const int B = UX.size(1);
-  const int nBlocksX = (B/threadsWithIdenticalWork) + (B %threadsWithIdenticalWork != 0); // 1
-  const int nBlocksY = ((Ntilde / 2)/IntraTeamBlockDepthForward) + ((Ntilde / 2) % IntraTeamBlockDepthForward != 0);
-  const dim3 blocks(nBlocksX, nBlocksY);
+  const dim3 blocks = prepareBlocksForIntraTournament(UX.size(1), Ntilde);
+  const dim3 threads(IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
     "rotMatForwardCuda",
-    ([&]{ PlayThetaGradTournamentWithinTeams<scalar_t><<<blocks,threads>>>(
+    ([&]{ PlayIntraTeamTournamentsForThetaGrad<scalar_t><<<blocks,threads>>>(
       UX.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
       G.packed_accessor32<scalar_t, 2, at::RestrictPtrTraits>(),
       C.packed_accessor32<scalar_t, 1, at::RestrictPtrTraits>(),
@@ -816,8 +864,8 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCudaTeamRR(
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
-  ScheduleTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
-  ScheduleIndividualTournamentsWithinTeamsForThetaGrads(C, S, UX, G, JVP, constants);
+  //ScheduleInterTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
+  ScheduleIntraTeamTournamentsForThetaGrads(C, S, UX, G, JVP, constants);
   
   return std::make_pair(G, JVP);
 }

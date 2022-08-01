@@ -9,8 +9,8 @@ import torch.cuda.profiler as profiler
 device = torch.device('cuda')
 dtype = torch.float32
 
-resultsPath = '/home/cangoksen14/funStuff/Givens-Orthogonal-Backprop/rotMat/'
-resultsFname = 'fig3ComparisonIn512and256increments'
+resultsPath = ''
+resultsFname = ''
 
 if not os.path.isdir ( resultsPath ):
     raise Exception("Non-existent results path!")
@@ -51,9 +51,8 @@ for i,N in enumerate(Ns):
 
         if t == 0:
             # warm up
-            U = rotMatFn.forward(X,thetas)
-            torch.cuda.synchronize()
-            JVP = rotMatFn.backward(thetas,U,G)
+            U = rotMatFn.forwardTeamRR(X,thetas)
+            JVP = rotMatFn.backwardTeamRR(thetas,U,G)
             torch.cuda.synchronize()
             continue
 
@@ -61,14 +60,13 @@ for i,N in enumerate(Ns):
         endFwd = torch.cuda.Event(enable_timing=True)
         
         startFwd.record()
-        U = rotMatFn.forward(X,thetas)
-        torch.cuda.synchronize()
-        JVP = rotMatFn.backward(thetas,U,G)
+        U = rotMatFn.forwardTeamRR(X,thetas)
+        JVP = rotMatFn.backwardTeamRR(thetas,U,G)
         torch.cuda.synchronize()
         endFwd.record()
-
-        forwardMilliseconds[i] += startFwd.elapsed_time(endFwd)
         torch.cuda.synchronize()
+        
+        forwardMilliseconds[i] += startFwd.elapsed_time(endFwd)
 
     forwardMilliseconds[i] /= nTrials
     print('On N={0:d}; With bs {1:d}  time in ms: {2:.10f} '.format(N, bs, startFwd.elapsed_time(endFwd)/1000) ) # milliseconds

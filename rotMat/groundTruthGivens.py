@@ -56,7 +56,6 @@ def sequentialGivensCircleMethod(UPyTorch, thetas, M):
     return UPyTorch
 
 def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
-    print("\nNEW\n")
     x = 0
     N = UPyTorch.size(0)
     K=N-M
@@ -101,7 +100,7 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                 #print("torch: ", i, j, "-> ", "S", round(sij.item(),6),"C: ",round(cij.item(),6))
                 x+=1
 
-    
+    '''
     i = j = None
     teamCount = int(Ntilde // teamSize) + int(Ntilde % teamSize != 0);
     dummyTeamIndex = -1;
@@ -143,7 +142,7 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                     UPyTorch = GivMat.matmul(UPyTorch)
                     
                     #print("torch: ", i, j, "->", "S", round(sij.item(),6), "C: ", round(cij.item(),6))
-                    x += 1
+                    x += 1'''
     
-    print("theta count: ", x)
+    #print("theta count: ", x)
     return UPyTorch
