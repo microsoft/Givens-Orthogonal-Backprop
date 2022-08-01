@@ -18,14 +18,14 @@
 #define ThreadsPerRowBackward 128
 
 // DELETE FORWARD SUFFIX, SAME FOR FORWARD AND BACKWARD
-#define InterTeamRRThreadsPerBlockForward MaximumThreadsPerBlock / 4
-#define InterTeamBlockDepthForward (int)(InterTeamRRThreadsPerBlockForward/WarpSize)
-#define InterTeamBlockWidthForward (int)(InterTeamRRThreadsPerBlockForward/InterTeamBlockDepthForward)
+#define InterTeamRRThreadsPerBlock MaximumThreadsPerBlock / 4
+#define InterTeamBlockDepth (int)(InterTeamRRThreadsPerBlock/WarpSize)
+#define InterTeamBlockWidth (int)(InterTeamRRThreadsPerBlock/InterTeamBlockDepth)
 
-// Current implementation dictates InterTeamBlockDepthForward to be 2 *IntraTeamBlockDepthForward
-#define IntraTeamRRThreadsPerBlockForward MaximumThreadsPerBlock
-#define IntraTeamBlockDepthForward (int)(InterTeamBlockDepthForward/2)
-#define IntraTeamBlockWidthForward (int)(IntraTeamRRThreadsPerBlockForward/IntraTeamBlockDepthForward)
+// Current implementation dictates InterTeamBlockDepth to be 2 *IntraTeamBlockDepth
+#define IntraTeamRRThreadsPerBlock MaximumThreadsPerBlock
+#define IntraTeamBlockDepth (int)(InterTeamBlockDepth/2)
+#define IntraTeamBlockWidth (int)(IntraTeamRRThreadsPerBlock/IntraTeamBlockDepth)
 
 // https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
 // https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error
@@ -49,7 +49,7 @@ __device__ double atomicAdd(
 
 int getTeamSizeForTesting()
 {
-  return InterTeamBlockDepthForward;
+  return InterTeamBlockDepth;
 }
 
 __device__ __forceinline__ std::pair<const int, const int> determineRowIndexPair(
@@ -141,12 +141,12 @@ template <typename scalar_t>
     volatile scalar_t* sdata,
     int tid)
 {
-  if (IntraTeamRRThreadsPerBlockForward >= 64) sdata[tid] += sdata[tid + 32];
-  if (IntraTeamRRThreadsPerBlockForward >= 32) sdata[tid] += sdata[tid + 16];
-  if (IntraTeamRRThreadsPerBlockForward >= 16) sdata[tid] += sdata[tid + 8];
-  if (IntraTeamRRThreadsPerBlockForward >= 8) sdata[tid] += sdata[tid + 4];
-  if (IntraTeamRRThreadsPerBlockForward >= 4) sdata[tid] += sdata[tid + 2];
-  if (IntraTeamRRThreadsPerBlockForward >= 2) sdata[tid] += sdata[tid + 1];
+  if (IntraTeamRRThreadsPerBlock >= 64) sdata[tid] += sdata[tid + 32];
+  if (IntraTeamRRThreadsPerBlock >= 32) sdata[tid] += sdata[tid + 16];
+  if (IntraTeamRRThreadsPerBlock >= 16) sdata[tid] += sdata[tid + 8];
+  if (IntraTeamRRThreadsPerBlock >= 8) sdata[tid] += sdata[tid + 4];
+  if (IntraTeamRRThreadsPerBlock >= 4) sdata[tid] += sdata[tid + 2];
+  if (IntraTeamRRThreadsPerBlock >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 template <typename scalar_t>
@@ -154,12 +154,12 @@ template <typename scalar_t>
     volatile scalar_t* sdata, 
     int tid)
 {
-  if (InterTeamRRThreadsPerBlockForward >= 64) sdata[tid] += sdata[tid + 32];
-  if (InterTeamRRThreadsPerBlockForward >= 32) sdata[tid] += sdata[tid + 16];
-  if (InterTeamRRThreadsPerBlockForward >= 16) sdata[tid] += sdata[tid + 8];
-  if (InterTeamRRThreadsPerBlockForward >= 8) sdata[tid] += sdata[tid + 4];
-  if (InterTeamRRThreadsPerBlockForward >= 4) sdata[tid] += sdata[tid + 2];
-  if (InterTeamRRThreadsPerBlockForward >= 2) sdata[tid] += sdata[tid + 1];
+  if (InterTeamRRThreadsPerBlock >= 64) sdata[tid] += sdata[tid + 32];
+  if (InterTeamRRThreadsPerBlock >= 32) sdata[tid] += sdata[tid + 16];
+  if (InterTeamRRThreadsPerBlock >= 16) sdata[tid] += sdata[tid + 8];
+  if (InterTeamRRThreadsPerBlock >= 8) sdata[tid] += sdata[tid + 4];
+  if (InterTeamRRThreadsPerBlock >= 4) sdata[tid] += sdata[tid + 2];
+  if (InterTeamRRThreadsPerBlock >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 /************************* FORWARD PROPAGATION*******************************/
@@ -379,7 +379,7 @@ template <typename scalar_t>
     return;
   }
 
-  int playerCountInBlock = IntraTeamBlockDepthForward *2;
+  int playerCountInBlock = IntraTeamBlockDepth *2;
   int blockStart = playerCountInBlock * blockIdx.y;
   if (playerCountInBlock > Ntilde-blockStart)
   {
@@ -489,8 +489,8 @@ bool ScheduleIntraTeamTournaments(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
-  const dim3 threads(IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
+  const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, IntraTeamBlockWidth, IntraTeamBlockDepth);
+  const dim3 threads(IntraTeamBlockWidth, IntraTeamBlockDepth);
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
@@ -514,10 +514,10 @@ void ScheduleInterTeamTournament(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
   
-  const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, InterTeamBlockWidthForward, InterTeamBlockDepthForward);
-  const dim3 threads(InterTeamBlockWidthForward, InterTeamBlockDepthForward);
+  const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, InterTeamBlockWidth, InterTeamBlockDepth);
+  const dim3 threads(InterTeamBlockWidth, InterTeamBlockDepth);
 
-  int teamCount = (Ntilde/InterTeamBlockDepthForward) + (Ntilde%InterTeamBlockDepthForward != 0);
+  int teamCount = (Ntilde/InterTeamBlockDepth) + (Ntilde%InterTeamBlockDepth != 0);
   const int dummyTeamIndex = teamCount;
   incrementIfNotEven(teamCount);
   
@@ -564,15 +564,15 @@ template <typename scalar_t>
     const int dummyTeamIndex,
     const int tournamentStep)
 {
-  //__shared__ scalar_t sAGridForBlock[InterTeamBlockDepthForward][InterTeamBlockWidthForward];
-  //scalar_t* sA = sAGridForBlock[threadIdx.y];
+  __shared__ scalar_t sAGridForBlock[InterTeamBlockDepth][InterTeamBlockWidth];
+  scalar_t* sA = sAGridForBlock[threadIdx.y];
 
   // If transpose k works on rows; otherwise on columns
   const int k = threadIdx.x + blockDim.x*blockIdx.x;
   const int tid = threadIdx.x;
   if (k >= UX.size(1)) // do we need a tidyY check here?
   {
-    //sA[tid] = 0;
+    sA[tid] = 0;
     return;
   }
 
@@ -585,7 +585,6 @@ template <typename scalar_t>
   scalar_t Gi = G[i][k];
 
   const int jStart = playerCountPerTeam * matchedTeams.second; //visiting team
-  //const int jEnd = jStart + playerCountPerTeam;
   int j = jStart + threadIdx.y - 1;
   
   const int N = UX.size(0);
@@ -600,7 +599,7 @@ template <typename scalar_t>
     
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
-      //sA[tid] = 0;
+      sA[tid] = 0;
       __syncthreads();
       continue;
     }
@@ -623,21 +622,22 @@ template <typename scalar_t>
     G[j][k] = newGj;
 
     auto res = UXi * newGj - newUXj * Gi;
-    atomicAdd(&JVP[thetaIndex], res);
+    //atomicAdd(&JVP[thetaIndex], res);
+    sA[tid] = res;
     __syncthreads();
 
-    /* Reduce
-    if (InterTeamBlockWidthForward == 1024) {
+    // Reduce
+    if (InterTeamBlockWidth == 1024) {
       if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
-    if (InterTeamBlockWidthForward >= 512) {
+    if (InterTeamBlockWidth >= 512) {
       if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
-    if (InterTeamBlockWidthForward >= 256) {
+    if (InterTeamBlockWidth >= 256) {
       if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-    if (InterTeamBlockWidthForward >= 128) {
+    if (InterTeamBlockWidth >= 128) {
       if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
     if (tid < 32) blockReduceAtBackwardInterTeamRR(sA, tid);
     
-    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);*/
+    if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 
   UX[i][k] = UXi;
@@ -656,7 +656,7 @@ template <typename scalar_t>
     const int dummyIndex,
     const int dMax)
 {
-  __shared__ scalar_t sAGridForBlock[IntraTeamBlockDepthForward][IntraTeamBlockWidthForward];
+  __shared__ scalar_t sAGridForBlock[IntraTeamBlockDepth][IntraTeamBlockWidth];
   const int tidY = threadIdx.y;
   scalar_t* sA = sAGridForBlock[tidY];
   
@@ -669,7 +669,7 @@ template <typename scalar_t>
     return;
   }
 
-  int playerCountInBlock = IntraTeamBlockDepthForward *2;
+  int playerCountInBlock = IntraTeamBlockDepth *2;
   int blockStart = playerCountInBlock * blockIdx.y;
   if (playerCountInBlock > Ntilde-blockStart)
   {
@@ -725,13 +725,13 @@ template <typename scalar_t>
     __syncthreads();
 
     // Reduce
-    if (IntraTeamBlockWidthForward == 1024) {
+    if (IntraTeamBlockWidth == 1024) {
       if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
-    if (IntraTeamBlockWidthForward >= 512) {
+    if (IntraTeamBlockWidth >= 512) {
       if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
-    if (IntraTeamBlockWidthForward >= 256) {
+    if (IntraTeamBlockWidth >= 256) {
       if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-    if (IntraTeamBlockWidthForward >= 128) {
+    if (IntraTeamBlockWidth >= 128) {
       if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
     if (tid < 32) blockReduceAtBackwardIntraTeamRR(sA, tid);
     
@@ -752,7 +752,7 @@ void ScheduleInterTeamTournamentForThetaGrads(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
   
-  int teamCount = (Ntilde / InterTeamBlockDepthForward) + (Ntilde % InterTeamBlockDepthForward != 0);
+  int teamCount = (Ntilde / InterTeamBlockDepth) + (Ntilde % InterTeamBlockDepth != 0);
   if (teamCount == 1)
   {
     return;
@@ -760,8 +760,8 @@ void ScheduleInterTeamTournamentForThetaGrads(
   const int dummyTeamIndex = teamCount;
   incrementIfNotEven(teamCount);
 
-  const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, InterTeamBlockWidthForward, InterTeamBlockDepthForward);
-  const dim3 threads(InterTeamBlockWidthForward, InterTeamBlockDepthForward);
+  const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, InterTeamBlockWidth, InterTeamBlockDepth);
+  const dim3 threads(InterTeamBlockWidth, InterTeamBlockDepth);
   
   for (int tournamentStep=0; tournamentStep<=teamCount-2; tournamentStep++)
   {
@@ -790,8 +790,8 @@ void ScheduleIntraTeamTournamentsForThetaGrads(
   auto dummyIndex = std::get<1>(rotMatConstants);
   auto Ntilde = std::get<2>(rotMatConstants);
 
-  const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
-  const dim3 threads(IntraTeamBlockWidthForward, IntraTeamBlockDepthForward);
+  const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, IntraTeamBlockWidth, IntraTeamBlockDepth);
+  const dim3 threads(IntraTeamBlockWidth, IntraTeamBlockDepth);
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),

@@ -111,9 +111,6 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1):
             print("Max abs deviation of grads: ")
             print(torch.absolute(thetas.grad-gradCustom).max())
 
-            print(torch.isclose(thetas.grad, gradCustom))
-
-        
         msgInfo = "N: " + str(N) + " M: " + str(M) + " batch: " + str(batch) + " XisId: " + str(XisId) + " usingTeamRR: " + str(isTeamRR)
         if  N == batch and XisId:
             #if dispResults: 
