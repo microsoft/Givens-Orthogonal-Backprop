@@ -18,11 +18,11 @@
 #define ThreadsPerRowBackward 128
 
 // DELETE FORWARD SUFFIX, SAME FOR FORWARD AND BACKWARD
-#define InterTeamRRThreadsPerBlock MaximumThreadsPerBlock / 4
+#define InterTeamRRThreadsPerBlock MaximumThreadsPerBlock  /2
 #define InterTeamBlockDepth (int)(InterTeamRRThreadsPerBlock/WarpSize)
 
 // Current implementation dictates InterTeamBlockDepth to be 2 *IntraTeamBlockDepth
-#define IntraTeamRRThreadsPerBlock MaximumThreadsPerBlock
+#define IntraTeamRRThreadsPerBlock MaximumThreadsPerBlock / 4
 #define IntraTeamBlockDepth (int)(InterTeamBlockDepth/2)
 
 // Compile time constants dictate that minimum width must be 32. This is also optimal for global memory broadcast behavior
