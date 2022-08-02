@@ -18,11 +18,11 @@
 #define ThreadsPerRowBackward 128
 
 // DELETE FORWARD SUFFIX, SAME FOR FORWARD AND BACKWARD
-#define InterTeamRRThreadsPerBlock MaximumThreadsPerBlock / 4
+#define InterTeamRRThreadsPerBlock MaximumThreadsPerBlock  /2
 #define InterTeamBlockDepth (int)(InterTeamRRThreadsPerBlock/WarpSize)
 
 // Current implementation dictates InterTeamBlockDepth to be 2 *IntraTeamBlockDepth
-#define IntraTeamRRThreadsPerBlock MaximumThreadsPerBlock
+#define IntraTeamRRThreadsPerBlock MaximumThreadsPerBlock / 4
 #define IntraTeamBlockDepth (int)(InterTeamBlockDepth/2)
 
 // Compile time constants dictate that minimum width must be 32. This is also optimal for global memory broadcast behavior
@@ -122,45 +122,27 @@ const dim3 prepareBlocksForTournament(const int B, const int &Ntilde, const int 
   return blocks;
 }
 
-
-
-template <typename scalar_t>
-  __device__ void blockReduceAtBackward(
+template <typename scalar_t, unsigned int blockSize>
+  __device__ void warpReduce(
     volatile scalar_t* sdata, 
     int tid)
 {
   __syncwarp();
-  if (ThreadsPerRowBackward >= 32) sdata[tid] += sdata[tid + 16];
-  if (ThreadsPerRowBackward >= 16) sdata[tid] += sdata[tid + 8];
-  if (ThreadsPerRowBackward >= 8) sdata[tid] += sdata[tid + 4];
-  if (ThreadsPerRowBackward >= 4) sdata[tid] += sdata[tid + 2];
-  if (ThreadsPerRowBackward >= 2) sdata[tid] += sdata[tid + 1];
+  if (blockSize >= 32) sdata[tid] += sdata[tid + 16];
+  if (blockSize >= 16) sdata[tid] += sdata[tid + 8];
+  if (blockSize >= 8) sdata[tid] += sdata[tid + 4];
+  if (blockSize >= 4) sdata[tid] += sdata[tid + 2];
+  if (blockSize >= 2) sdata[tid] += sdata[tid + 1];
 }
 
-template <typename scalar_t>
-  __device__ void blockReduceAtBackwardIntraTeamRR(
-    volatile scalar_t* sdata,
-    int tid)
+template <unsigned int blockSize>
+  __device__ void convergeWithBlock(int tid)
 {
-  __syncwarp();
-  if (IntraTeamBlockWidth >= 32) sdata[tid] += sdata[tid + 16]; 
-  if (IntraTeamBlockWidth >= 16) sdata[tid] += sdata[tid + 8]; 
-  if (IntraTeamBlockWidth >= 8) sdata[tid] += sdata[tid + 4];
-  if (IntraTeamBlockWidth >= 4) sdata[tid] += sdata[tid + 2];
-  if (IntraTeamBlockWidth >= 2) sdata[tid] += sdata[tid + 1]; 
-}
-
-template <typename scalar_t>
-  __device__ void blockReduceAtBackwardInterTeamRR(
-    volatile scalar_t* sdata, 
-    int tid)
-{
-  __syncwarp();
-  if (InterTeamBlockWidth >= 32) sdata[tid] += sdata[tid + 16]; 
-  if (InterTeamBlockWidth >= 16) sdata[tid] += sdata[tid + 8]; 
-  if (InterTeamBlockWidth >= 8) sdata[tid] += sdata[tid + 4]; 
-  if (InterTeamBlockWidth >= 4) sdata[tid] += sdata[tid + 2]; 
-  if (InterTeamBlockWidth >= 2) sdata[tid] += sdata[tid + 1];
+  if (blockSize == 1024) { if (tid < 512)  __syncthreads(); }
+  if (blockSize >= 512) { if (tid < 256)   __syncthreads(); }
+  if (blockSize >= 256) { if (tid < 128)   __syncthreads(); }
+  if (blockSize >= 128) { if (tid < 64)  __syncthreads(); }
+  if (blockSize >= 64) { if (tid < 32 )  __syncthreads(); }
 }
 
 /************************* FORWARD PROPAGATION*******************************/
@@ -255,7 +237,7 @@ template <typename scalar_t>
   __shared__ scalar_t sA[ThreadsPerRowBackward];
 
   // k is the column index of M and the row index of Uf, to set col of A
-  const int tid = threadIdx.y;
+  const int tid = threadIdx.x;
   const int k = tid + blockDim.y*blockIdx.y;
   if (k >= UX.size(1))
   {
@@ -302,18 +284,13 @@ template <typename scalar_t>
   __syncthreads();
 
   // Reduce
-  if (ThreadsPerRowBackward == 1024) {
-    if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
-  if (ThreadsPerRowBackward >= 512) {
-    if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads();}
-  if (ThreadsPerRowBackward >= 256) {
-    if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-  if (ThreadsPerRowBackward >= 128) {
-    if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if (ThreadsPerRowBackward >= 64) {
-    if (tid < 32 ) sA[tid] += sA[tid + 32]; __syncthreads();}
-  if(tid < 16) blockReduceAtBackward(sA, tid);
+  if (ThreadsPerRowBackward == 1024) { if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
+  if (ThreadsPerRowBackward >= 512) { if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
+  if (ThreadsPerRowBackward >= 256) {if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
+  if (ThreadsPerRowBackward >= 128) { if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
+  if (ThreadsPerRowBackward >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32]; __syncthreads(); }
   
+  if(tid < 16) warpReduce<scalar_t,ThreadsPerRowBackward>(sA, tid);
   if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
 
@@ -337,7 +314,7 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   auto B = UX.size(1);
   const int nBlocksY = B/ThreadsPerRowBackward + (B % ThreadsPerRowBackward != 0);
   const dim3 blocks(Ntilde / 2, nBlocksY);
-  const dim3 threads(1, ThreadsPerRowBackward);
+  const dim3 threads(ThreadsPerRowBackward,1);
 
   // The circle-method is used to generate round-robin sequences per block (equivalent to scheduling round-robin sports tournaments)
   // 'tournamentStep' refers to to the current turn of the tournament, where all updates are executed in parallel. here are n-1 steps
@@ -577,18 +554,12 @@ template <typename scalar_t>
   if (k >= B) // do we need a tidyY check here?
   {
     sA[tid] = 0;
-    //if (k >= 16)
-    //{
-      return;
-    //}
+    return;
   }
 
-  //if (k == B-1 && blockIdx.y != 0 ) printf("\n k is %d and tidY is %d", k, threadIdx.y);
 
   auto matchedTeams = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
   if (matchedTeams.second == dummyTeamIndex)  return;
-
-  //if (k == B-1 && blockIdx.y != 0 ) printf("\n still here, no dummy. teams matched are %d and %d", matchedTeams.first, matchedTeams.second);
 
   const int playerCountPerTeam = blockDim.y;
   const int i =  playerCountPerTeam * matchedTeams.first + threadIdx.y; // home team
@@ -609,14 +580,11 @@ template <typename scalar_t>
       j += playerCountPerTeam;
     }
     
-    //if (k == B-1 && blockIdx.y != 0) printf("\n indices are i %d j %d", i, j);
-
     if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
     {
-      //if (k == B-1 && blockIdx.y != 0 ) printf("\n indices are out of range dummyIndex %d dMax %d", dummyIndex, dMax);
       sA[tid] = 0;
       __syncthreads();
-      __syncthreads();
+      convergeWithBlock<InterTeamBlockWidth>(tid);
       continue;
     }
 
@@ -639,32 +607,16 @@ template <typename scalar_t>
 
     auto res = UXi * newGj - newUXj * Gi;
     sA[tid] = res;
-    
     __syncthreads();
 
-    //if (k == B-1) printf("\n was I here? tidY %d\n", threadIdx.y);
-    //atomicAdd(&JVP[thetaIndex], res);
-
     // Reduce
-    if (InterTeamBlockWidth == 1024) { if (tid < 512) sA[tid] += sA[tid + 512]; __syncthreads();}
-    //if (k == B-1) printf("\n was I here?1 tidY %d\n", threadIdx.y);
-    if (InterTeamBlockWidth >= 512) { if (tid < 256)  sA[tid] += sA[tid + 256]; __syncthreads();}
-    //if (k == B-1) printf("\n was I here?2 tidY %d\n", threadIdx.y);
-    if (InterTeamBlockWidth >= 256) { if (tid < 128) sA[tid] += sA[tid + 128];  __syncthreads(); 
-     // if (k == B-1) printf("\n was I here?3 tidY %d\n", threadIdx.y);
-    }
-    //if (k == B-1) printf("\n was I here?4 tidY %d\n", threadIdx.y);
-    
-    if (InterTeamBlockWidth >= 128) { if (tid < 64)  sA[tid] += sA[tid + 64]; __syncthreads();
-    //if (k == B-1) printf("\n was I here?5 tidY %d\n", threadIdx.y);
-    }
-    //if (k == B-1) printf("\n was I here?6 tidY %d\n", threadIdx.y);
-    
+    if (InterTeamBlockWidth == 1024) { if (tid < 512) sA[tid] += sA[tid + 512]; __syncthreads(); }
+    if (InterTeamBlockWidth >= 512) { if (tid < 256)  sA[tid] += sA[tid + 256]; __syncthreads(); }
+    if (InterTeamBlockWidth >= 256) { if (tid < 128) sA[tid] += sA[tid + 128];  __syncthreads(); }
+    if (InterTeamBlockWidth >= 128) { if (tid < 64)  sA[tid] += sA[tid + 64]; __syncthreads(); }
     if (InterTeamBlockWidth >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32];  __syncthreads(); }
-
-    if (tid < 16) blockReduceAtBackwardInterTeamRR(sA, tid);
-
-    //if (k == B-1) printf("\n did it happen in between? 8  tidY %d\n", threadIdx.y);
+    
+    if (tid < 16) warpReduce<scalar_t,InterTeamBlockWidth>(sA, tid);
     if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 
@@ -724,6 +676,7 @@ template <typename scalar_t>
     {
       sA[tid] = 0;
       __syncthreads();
+      convergeWithBlock<IntraTeamBlockWidth>(tid);
       continue;
     }
     thetaIndex = i*N - (i+2)*(i+1)/2 + j;
@@ -751,18 +704,13 @@ template <typename scalar_t>
     sA[tid] = newUXi * newGj - newUXj * newGi;
     __syncthreads();
 
-    if (IntraTeamBlockWidth == 1024) {
-      if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 512) {
-      if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 256) {
-      if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 128) {
-      if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 64) {
-      if (tid < 32)  sA[tid] += sA[tid + 32]; __syncthreads(); }
-    
-    if (tid < 16) blockReduceAtBackwardIntraTeamRR(sA, tid);
+    if (IntraTeamBlockWidth == 1024) { if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
+    if (IntraTeamBlockWidth >= 512) { if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
+    if (IntraTeamBlockWidth >= 256) { if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
+    if (IntraTeamBlockWidth >= 128) { if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
+    if (IntraTeamBlockWidth >= 64) {if (tid < 32)  sA[tid] += sA[tid + 32]; __syncthreads(); }
+
+    if (tid < 16) warpReduce<scalar_t,IntraTeamBlockWidth>(sA, tid);
     if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 }
@@ -791,12 +739,6 @@ void ScheduleInterTeamTournamentForThetaGrads(
   const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, InterTeamBlockWidth, InterTeamBlockDepth);
   const dim3 threads(InterTeamBlockWidth, InterTeamBlockDepth);
   
-  //std::cout << "\n  THETA GRAD inter theta width: "<<  InterTeamBlockWidth << "\ninter theta depth: " << InterTeamBlockDepth;
-  //std::cout << "\n column count "<<  UX.size(1);
-  //std::cout << "\nblocks X: " << blocks.x << " blocks Y: " << blocks.y;
-  //std::cout << "\nhreads X: " << threads.x << " threads Y: " << threads.y;
-  //std::cout << "\n team count: " << teamCount << " dummy team index: " << dummyTeamIndex;
-
   for (int tournamentStep=0; tournamentStep<=teamCount-2; tournamentStep++)
   {
     AT_DISPATCH_FLOATING_TYPES(
@@ -826,11 +768,6 @@ void ScheduleIntraTeamTournamentsForThetaGrads(
 
   const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, IntraTeamBlockWidth, IntraTeamBlockDepth);
   const dim3 threads(IntraTeamBlockWidth, IntraTeamBlockDepth);
-
-  //std::cout << "\n\n THETA GRAD INTRA theta width: "<<  IntraTeamBlockWidth << "\nintra theta depth: " << IntraTeamBlockDepth;
-  //std::cout << "\n column count "<<  UX.size(1);
-  //std::cout << "\nblocks X: " << blocks.x << " blocks Y: " << blocks.y;
-  //std::cout << "\nhreads X: " << threads.x << " threads Y: " << threads.y << "\n";
 
   AT_DISPATCH_FLOATING_TYPES(
     C.type(),
