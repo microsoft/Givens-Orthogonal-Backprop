@@ -71,7 +71,7 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
     
     teamCount = int(Ntilde// teamSize) + int(Ntilde % teamSize != 0)
     
-    '''for teamNo in range(0, teamCount):
+    for teamNo in range(0, teamCount):
         start = teamNo*teamSize
         currentTeamSize = teamSize
         if start + currentTeamSize > Ntilde:
@@ -99,24 +99,26 @@ def sequentialGivensTeamRR(UPyTorch, thetas, M, teamSize):
                 UPyTorch = GivMat.matmul(UPyTorch)
 
                 #print("torch: ", i, j, "-> ", "S", round(sij.item(),6),"C: ",round(cij.item(),6))
-                x+=1'''
+                x+=1
 
 
     # Add dummy team Index for team tournament
     i = j = None
-    dummyTeamIndex = -1;
-    if teamCount %2 == 1:
-        dummyTeamIndex = teamCount
+
+    dummyTeamIndex = teamCount
+    if(teamCount % 2 != 0):
         teamCount += 1
-
-
     blocksCount = int(Ntilde/2/teamSize) + int(Ntilde/2 % teamSize != 0)
-    for teamTournamentStep in range(teamCount-1-1,-1,-1):
+
+
+    for matchUpRound in range(teamCount-2,-1,-1):
         for blockIndx in range(blocksCount):
-            team_i, team_j = getRowIndexPair(blockIndx, teamCount, teamTournamentStep)
+
+            team_i, team_j = getRowIndexPair(blockIndx, teamCount, matchUpRound)
             if team_j == dummyTeamIndex : 
                 continue
             
+
             iStart = teamSize * team_i
             jStart = teamSize * team_j
             for teamMatchStep in range(teamSize):

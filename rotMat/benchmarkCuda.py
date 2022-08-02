@@ -16,7 +16,7 @@ if not os.path.isdir ( resultsPath ):
     raise Exception("Non-existent results path!")
 
 Nmin = 512
-Nmax = 2048
+Nmax = 4096
 Nstep = 256
 Ns = range(Nmin,Nmax + 1,Nstep)
 nNs = len(Ns)
@@ -38,7 +38,6 @@ backwardMilliseconds = torch.zeros(nNs)
 
 profiler.start()
 for i,N in enumerate(Ns):
-
     #print("On N={0:d}; largest is {1:d}".format(N,Nmax) )
     nThetas = calculateThetaCount(N,N)
     #print("nThetas=" +str(nThetas) )
