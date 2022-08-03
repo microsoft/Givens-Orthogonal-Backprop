@@ -167,6 +167,7 @@ template <unsigned int blockSize>
   auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
   const int i = rowIndices.first;
   const int j = rowIndices.second;
+
   if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
   {
     return;
@@ -248,6 +249,7 @@ template <typename scalar_t>
   auto rowIndices = determineRowIndexPair(blockIdx.x, Ntilde, tournamentStep);
   int i = rowIndices.first;
   int j = rowIndices.second;
+
   if (areRowIndicesOutOfRange(i, j, dummyIndex, dMax))
   {
     sA[tid] = 0;
@@ -291,6 +293,7 @@ template <typename scalar_t>
   if (ThreadsPerRowBackward >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32]; __syncthreads(); }
   
   if(tid < 16) warpReduce<scalar_t,ThreadsPerRowBackward>(sA, tid);
+
   if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
 
@@ -795,5 +798,6 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCudaTeamRR(
 
   ScheduleInterTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
   ScheduleIntraTeamTournamentsForThetaGrads(C, S, UX, G, JVP, constants);
+
   return std::make_pair(G, JVP);
 }

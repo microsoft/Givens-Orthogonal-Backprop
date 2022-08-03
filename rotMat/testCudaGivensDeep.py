@@ -31,7 +31,6 @@ parameters = [
     ]
 parameters = [[x] + param for x in [True,False] for param in parameters]
 
-
 for XisId, N, M, batch in parameters: 
     K = N-M
     rotUnit = GivensRotations.RotMat(N, M).to(device)
@@ -52,11 +51,6 @@ for XisId, N, M, batch in parameters:
     startFwd.record()
     UXcustom = rotUnit.forward(X)
     endFwd.record()
-    # Waits for everything to finish running
-    torch.cuda.synchronize()
-
-    loss = torch.sum(G*UXcustom)
-
     startBck = torch.cuda.Event(enable_timing=True)
     endBck = torch.cuda.Event(enable_timing=True)
     startBck.record()
@@ -70,6 +64,7 @@ for XisId, N, M, batch in parameters:
     backwardMilliseconds = startBck.elapsed_time(endBck)
     if dispResults:
         print( '(In ms) Forward time: {0:.3f} | Backward time: {1:.3f}'.format(forwardMilliseconds,backwardMilliseconds) ) # milliseconds
+
     XgradCustom = X.grad.to(torch.device('cpu'))
     UXcustom = UXcustom.to(torch.device('cpu'))
 
@@ -100,7 +95,6 @@ for XisId, N, M, batch in parameters:
     # Waits for everything to finish running
     torch.cuda.synchronize()
 
-    # Milliseconds
     forwardMilliseconds = startFwd.elapsed_time(endFwd)
     backwardMilliseconds = startBck.elapsed_time(endBck)
     if dispResults:

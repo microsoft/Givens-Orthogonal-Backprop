@@ -19,6 +19,7 @@ batch_size =  32
 # To drop angle params we need to have at least the last *pair* of dimensions left out
 if K > 1:
     nThetas -= int(K*(K-1)/2)
+
 print("N:",N, "| M:", M, "| #thetas:", nThetas, "| batch size:", batch_size,"\n")
 
 X = torch.randn(N,batch_size).to(dtype).to(device)

@@ -40,6 +40,7 @@ torch::Tensor rotMatForwardTeamRR(torch::Tensor X, torch::Tensor thetas)
 }
 
 std::pair<torch::Tensor, torch::Tensor> rotMatBackwardTeamRR( torch::Tensor thetas, torch::Tensor U, torch::Tensor G)
+
 {
   CHECK_INPUT(thetas);
   CHECK_INPUT(U);

@@ -8,7 +8,8 @@ import numpy as np
 import rotMatcuda
 from groundTruthGivens import sequentialGivens
 
-# This script is not meant as a rigorous benchmark; only to verify correctness against naive autodiff
+# This script is not meant as a rigorous benchmark;
+# only to verify correctness against naive autodiff
 
 device = torch.device('cuda')
 dtype = torch.float32
@@ -122,6 +123,5 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1):
         torch.testing.assert_close(Ucustom, UPyTorch, check_layout=True, msg= msgInfo)
         torch.testing.assert_close(thetas.grad, gradCustom, check_layout=True, msg=msgInfo)
         print("Test ", index, " try ", i,  "passed!")
-
 
 print("All tests passed!")

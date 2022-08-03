@@ -13,7 +13,6 @@ class RotMatFunction(torch.autograd.Function):
     '''
         If the inputs are expected to be re-used, all cloning must be done here!
     '''
-
     @staticmethod
     def forward(ctx, x, thetas):
         ux = rotMatcuda.forward(torch.clone(x.detach()), thetas.detach())
