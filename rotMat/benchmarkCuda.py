@@ -18,6 +18,11 @@ if not os.path.isdir ( resultsPath ):
 Nmin = 512
 Nmax = 4096
 
+useTeamRR = True
+forward = rotMatFn.forwardTeamRR if useTeamRR else rotMatFn.forward
+backward = rotMatFn.backwardTeamRR if useTeamRR else rotMatFn.backward
+print("USING TEAM RR?", useTeamRR)
+
 Nstep = 256
 Ns = range(Nmin,Nmax + 1,Nstep)
 nNs = len(Ns)
@@ -32,7 +37,6 @@ def calculateThetaCount(N,M):
     return nThetas
 
 forwardAndBackMilliSeconds = torch.zeros(nNs)
-
 profiler.start()
 for i,N in enumerate(Ns):
     #print("On N={0:d}; largest is {1:d}".format(N,Nmax) )
@@ -45,20 +49,12 @@ for i,N in enumerate(Ns):
         G = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
         torch.cuda.synchronize()
 
-    for t in range(nTrials+1):
-        thetas = torch.randn(get,requires_grad=True).to(dtype).to(device)
-        X = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
-        G = torch.zeros((N, bs)).normal_(0, 1).to(dtype).to(device)
-        torch.cuda.synchronize()
-        # You *cannot* use time.time() to time cuda-enabled functions! The cpu
-        # proceeds asynchronously, leading to ludicrous underestimates.
-        #
         # The elapsed_time function returns time in *milliseconds*
         if t == 0:
             # warm up
-            U = rotMatFn.forward(X,thetas)
+            U = forward(X,thetas)
             torch.cuda.synchronize()
-            JVP = rotMatFn.backward(thetas,U,G)
+            JVP = backward(thetas,U,G)
             torch.cuda.synchronize()
             continue
 
@@ -66,9 +62,9 @@ for i,N in enumerate(Ns):
         end = torch.cuda.Event(enable_timing=True)
         
         start.record()
-        U = rotMatFn.forward(X,thetas)
+        U = forward(X,thetas)
         torch.cuda.synchronize()
-        JVP = rotMatFn.backward(thetas,U,G)
+        JVP = backward(thetas,U,G)
         torch.cuda.synchronize()
         end.record()
 

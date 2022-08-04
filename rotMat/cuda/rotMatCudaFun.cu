@@ -95,7 +95,7 @@ void incrementIfNotEven(int &Ntilde)
   }
 }
 
-std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int N)
+std::tuple<int, int, int> determineRotMatConstants(const int &nThetas, const int &N)
 {
   auto dMax = N-1; // If nThetas == maxPairs
   if (nThetas < N*(N-1)/2)
@@ -111,7 +111,7 @@ std::tuple<int, int, int> determineRotMatConstants(const int nThetas, const int 
   return std::make_tuple(dMax, dummyIndex, Ntilde);
 }
 
-const dim3 prepareBlocksForTournament(const int B, const int &Ntilde, const int &width, const int &depth )
+const dim3 prepareBlocksForTournament(const int &B, const int &Ntilde, const int &width, const int &depth )
 {
   const int nBlocksX = (B/width) + (B % width != 0);
   
@@ -123,9 +123,21 @@ const dim3 prepareBlocksForTournament(const int B, const int &Ntilde, const int 
 }
 
 template <typename scalar_t, unsigned int blockSize>
+  __device__ void blockReduce(
+    volatile scalar_t* sA, 
+    const int &tid)
+{
+  if (blockSize == 1024) { if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
+  if (blockSize >= 512) { if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
+  if (blockSize >= 256) {if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
+  if (blockSize >= 128) { if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
+  if (blockSize >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32]; __syncthreads(); }
+}
+
+template <typename scalar_t, unsigned int blockSize>
   __device__ void warpReduce(
     volatile scalar_t* sdata, 
-    int tid)
+    const int &tid)
 {
   __syncwarp();
   if (blockSize >= 32) sdata[tid] += sdata[tid + 16];
@@ -136,7 +148,7 @@ template <typename scalar_t, unsigned int blockSize>
 }
 
 template <unsigned int blockSize>
-  __device__ void convergeWithBlock(int tid)
+  __device__ void convergeWithBlock(const int &tid)
 {
   if (blockSize == 1024) { if (tid < 512)  __syncthreads(); }
   if (blockSize >= 512) { if (tid < 256)   __syncthreads(); }
@@ -189,10 +201,10 @@ template <unsigned int blockSize>
 torch::Tensor rotMatForwardCuda(torch::Tensor X, torch::Tensor thetas)
 {
   const int N = X.size(0);
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), N);
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
+  auto constants = determineRotMatConstants(thetas.size(0), N);
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
@@ -286,14 +298,8 @@ template <typename scalar_t>
   __syncthreads();
 
   // Reduce
-  if (ThreadsPerRowBackward == 1024) { if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads(); }
-  if (ThreadsPerRowBackward >= 512) { if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
-  if (ThreadsPerRowBackward >= 256) {if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-  if (ThreadsPerRowBackward >= 128) { if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-  if (ThreadsPerRowBackward >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32]; __syncthreads(); }
-  
-  if(tid < 16) warpReduce<scalar_t,ThreadsPerRowBackward>(sA, tid);
-
+  blockReduce<scalar_t, ThreadsPerRowBackward>(sA, tid);
+  if(tid < 16) warpReduce<scalar_t, ThreadsPerRowBackward>(sA, tid);
   if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
 }
 
@@ -302,11 +308,10 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCuda(
   torch::Tensor UX,
   torch::Tensor G)
 {
-
-  auto rotMatConstants = determineRotMatConstants(thetas.size(0), UX.size(0));
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
+  auto constants = determineRotMatConstants(thetas.size(0), UX.size(0));
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
 
   auto C = torch::cos(thetas.detach());
   auto S = torch::sin(thetas.detach());
@@ -461,16 +466,15 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
   X[i][col] = Xi;
 }
 
-
 bool ScheduleIntraTeamTournaments(
   torch::Tensor C, 
   torch::Tensor S, 
   torch::Tensor X,
-  std::tuple<int, int, int> rotMatConstants)
+  std::tuple<int, int, int> constants)
 {
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
 
   const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, IntraTeamBlockWidth, IntraTeamBlockDepth);
   const dim3 threads(IntraTeamBlockWidth, IntraTeamBlockDepth);
@@ -491,11 +495,11 @@ void ScheduleInterTeamTournament(
   torch::Tensor C, 
   torch::Tensor S, 
   torch::Tensor X,
-  std::tuple<int, int, int> rotMatConstants)
+  std::tuple<int, int, int> constants)
 {
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
   
   const dim3 blocks = prepareBlocksForTournament(X.size(1), Ntilde, InterTeamBlockWidth, InterTeamBlockDepth);
   const dim3 threads(InterTeamBlockWidth, InterTeamBlockDepth);
@@ -516,7 +520,6 @@ void ScheduleInterTeamTournament(
         dummyIndex, dMax, teamCount, dummyTeamIndex, tournamentStep);}));
   }
 }
-
 
 torch::Tensor rotMatForwardCudaTeamRR(torch::Tensor X, torch::Tensor thetas)
 {
@@ -559,7 +562,6 @@ template <typename scalar_t>
     sA[tid] = 0;
     return;
   }
-
 
   auto matchedTeams = determineRowIndexPair(blockIdx.y, teamCount, tournamentStep);
   if (matchedTeams.second == dummyTeamIndex)  return;
@@ -613,20 +615,14 @@ template <typename scalar_t>
     __syncthreads();
 
     // Reduce
-    if (InterTeamBlockWidth == 1024) { if (tid < 512) sA[tid] += sA[tid + 512]; __syncthreads(); }
-    if (InterTeamBlockWidth >= 512) { if (tid < 256)  sA[tid] += sA[tid + 256]; __syncthreads(); }
-    if (InterTeamBlockWidth >= 256) { if (tid < 128) sA[tid] += sA[tid + 128];  __syncthreads(); }
-    if (InterTeamBlockWidth >= 128) { if (tid < 64)  sA[tid] += sA[tid + 64]; __syncthreads(); }
-    if (InterTeamBlockWidth >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32];  __syncthreads(); }
-    
-    if (tid < 16) warpReduce<scalar_t,InterTeamBlockWidth>(sA, tid);
+    blockReduce<scalar_t, InterTeamBlockWidth>(sA, tid);
+    if(tid < 16) warpReduce<scalar_t, InterTeamBlockWidth>(sA, tid);
     if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 
   UX[i][k] = UXi;
   G[i][k] = Gi;
 }
-
 
 template <typename scalar_t> 
   __global__ void PlayIntraTeamTournamentsForThetaGrad(
@@ -707,17 +703,12 @@ template <typename scalar_t>
     sA[tid] = newUXi * newGj - newUXj * newGi;
     __syncthreads();
 
-    if (IntraTeamBlockWidth == 1024) { if (tid < 512) { sA[tid] += sA[tid + 512]; } __syncthreads();}
-    if (IntraTeamBlockWidth >= 512) { if (tid < 256) { sA[tid] += sA[tid + 256]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 256) { if (tid < 128) { sA[tid] += sA[tid + 128]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 128) { if (tid < 64) { sA[tid] += sA[tid + 64]; } __syncthreads(); }
-    if (IntraTeamBlockWidth >= 64) {if (tid < 32)  sA[tid] += sA[tid + 32]; __syncthreads(); }
-
-    if (tid < 16) warpReduce<scalar_t,IntraTeamBlockWidth>(sA, tid);
+    // Reduce
+    blockReduce<scalar_t, IntraTeamBlockWidth>(sA, tid);
+    if(tid < 16) warpReduce<scalar_t, IntraTeamBlockWidth>(sA, tid);
     if (tid == 0)  atomicAdd(&JVP[thetaIndex], sA[tid]);
   }
 }
-
 
 void ScheduleInterTeamTournamentForThetaGrads(
   torch::Tensor C, 
@@ -725,11 +716,11 @@ void ScheduleInterTeamTournamentForThetaGrads(
   torch::Tensor UX,
   torch::Tensor G,
   torch::Tensor JVP,
-  std::tuple<int, int, int> rotMatConstants)
+  std::tuple<int, int, int> constants)
 {
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
   
   int teamCount = (Ntilde / InterTeamBlockDepth) + (Ntilde % InterTeamBlockDepth != 0);
   if (teamCount == 1)
@@ -763,11 +754,11 @@ void ScheduleIntraTeamTournamentsForThetaGrads(
   torch::Tensor UX,
   torch::Tensor G,
   torch::Tensor JVP,
-  std::tuple<int, int, int> rotMatConstants)
+  std::tuple<int, int, int> constants)
 {
-  auto dMax = std::get<0>(rotMatConstants);
-  auto dummyIndex = std::get<1>(rotMatConstants);
-  auto Ntilde = std::get<2>(rotMatConstants);
+  auto dMax = std::get<0>(constants);
+  auto dummyIndex = std::get<1>(constants);
+  auto Ntilde = std::get<2>(constants);
 
   const dim3 blocks = prepareBlocksForTournament(UX.size(1), Ntilde, IntraTeamBlockWidth, IntraTeamBlockDepth);
   const dim3 threads(IntraTeamBlockWidth, IntraTeamBlockDepth);

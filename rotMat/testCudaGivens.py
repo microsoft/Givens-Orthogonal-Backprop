@@ -33,7 +33,7 @@ parameters = [[x] for x in Ns]
 parameters = [x + [m] for m in Ms for x in parameters if  m <= x[0]]
 parameters = [x + [b] for b in batch_sizes for x in parameters]
 parameters = [x + [isId] for isId in [True, False] for x in parameters]
-parameters = [x + [rr] for rr in [True] for x in parameters]
+parameters = [x + [rr] for rr in [False, True] for x in parameters]
 
 trialCount = 1
 for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1): 

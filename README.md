@@ -2,7 +2,7 @@
 
 Code for: https://arxiv.org/abs/2106.00003 Allows for gradient descent over rotational matrices. 
 
-
+(Please note that the cpp extension is not optimized and is intended as a POC.)
 
 ## Installation
 PLease use python 3.8. You can replicate our development environment via conda, simply run:

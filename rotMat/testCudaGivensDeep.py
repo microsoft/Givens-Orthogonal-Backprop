@@ -5,6 +5,7 @@ import torch
 import cuda.GivensRotations as GivensRotations
 import time
 import numpy as np
+import rotMatcuda
 
 # This script is not meant as a rigorous benchmark; only to verify correctness against naive autodiff
 
@@ -15,24 +16,29 @@ dtype = torch.float32
 torch.manual_seed(10)
 dispResults = False
 
-parameters = [
-    [15, 15, 15],
-    [15, 15, 3],
-    [15, 15, 32],
-    [15, 5, 15],
-    [15, 5, 3],
-    [15, 5, 32],
-    [33, 15, 15],
-    [33, 15, 3],
-    [33, 15, 32],
-    [33, 5, 15],
-    [33, 5, 3],
-    [33, 5, 32]
-    ]
-parameters = [[x] + param for x in [True,False] for param in parameters]
+Ns = [3, 32, 6, 15, 33]
 
-for XisId, N, M, batch in parameters: 
-    K = N-M
+teamSize = rotMatcuda.getTeamSize()
+print("TEAM SIZE:", teamSize, "\n")
+if teamSize <= 16: Ns = [teamSize, teamSize+1, teamSize *2 + 1]
+if teamSize <= 8: Ns.append(teamSize*4 + int(teamSize/3))
+
+Ms =Ns
+batch_sizes = [6, 15, 3,17, 25,26, 27,33]
+
+parameters = [[x] for x in Ns]
+parameters = [x + [m] for m in Ms for x in parameters if  m <= x[0]]
+parameters = [x + [b] for b in batch_sizes for x in parameters]
+parameters = [x + [isId] for isId in [True, False] for x in parameters]
+parameters = [x + [rr] for rr in [False, True] for x in parameters]
+
+for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1): 
+    
+    if isTeamRR:
+        rotUnit = GivensRotations.RotMatOpt(N, M).to(device)
+    else:
+        rotUnit = GivensRotations.RotMat(N, M).to(device)
+    
     rotUnit = GivensRotations.RotMat(N, M).to(device)
     rotUnit.thetas.data = torch.ones(rotUnit.thetas.data.size()).to(device) * np.pi * 2
     G = torch.randn(N,batch).to(dtype).to(device)
@@ -51,6 +57,8 @@ for XisId, N, M, batch in parameters:
     startFwd.record()
     UXcustom = rotUnit.forward(X)
     endFwd.record()
+    
+    loss = torch.sum(G*UXcustom)
     startBck = torch.cuda.Event(enable_timing=True)
     endBck = torch.cuda.Event(enable_timing=True)
     startBck.record()
@@ -82,17 +90,14 @@ for XisId, N, M, batch in parameters:
     startFwd.record()
     UXExplicit = rotUnit.getU() @ XExplicit
     endFwd.record()
-    # Waits for everything to finish running
     torch.cuda.synchronize()
 
     loss = torch.sum(GExplicit*UXExplicit)
-
     startBck = torch.cuda.Event(enable_timing=True)
     endBck = torch.cuda.Event(enable_timing=True)
     startBck.record()
     loss.backward()
     endBck.record()
-    # Waits for everything to finish running
     torch.cuda.synchronize()
 
     forwardMilliseconds = startFwd.elapsed_time(endFwd)
@@ -123,6 +128,7 @@ for XisId, N, M, batch in parameters:
         torch.testing.assert_close(UXcustom @ UXcustom.t(), torch.eye(N,N), msg=msgInfo)
         torch.testing.assert_close(UXExplicit @ UXExplicit.t(), torch.eye(N,N), msg=msgInfo)
     torch.cuda.synchronize()
+    print(index, "Test passed!")
 
 print("All tests passed!")
 
