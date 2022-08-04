@@ -437,6 +437,8 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
   int j = jStart + threadIdx.y;
   
   const int N = X.size(0);
+  int thetaIndex;
+  scalar_t Xj, sij, cij;
   for (int step =0; step < playerCountPerTeam; step++, j++)
   {
     if (j >= jEnd)
@@ -450,14 +452,13 @@ template <typename scalar_t> __global__ void PlayTeamTournamentMatch(
       continue;
     }
 
-    const int thetaIndex = i*N - (i+2)*(i+1)/2 + j;
-    const scalar_t cij = C[thetaIndex];
-    const scalar_t sij = S[thetaIndex];
+    thetaIndex = i*N - (i+2)*(i+1)/2 + j;
+    cij = C[thetaIndex];
+    sij = S[thetaIndex];
 
     // Apply Givens: Update U's offsets
-    const scalar_t Xj = X[j][col];
+    Xj = X[j][col];
 
-    // must update uj before updating ui
     X[j][col] = Xi*sij + Xj*cij;
     Xi = Xi*cij - Xj*sij;
     __syncthreads();

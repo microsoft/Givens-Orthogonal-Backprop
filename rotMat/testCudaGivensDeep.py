@@ -131,6 +131,3 @@ for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1):
     print(index, "Test passed!")
 
 print("All tests passed!")
-
-
-

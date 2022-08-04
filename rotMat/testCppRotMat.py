@@ -112,5 +112,3 @@ if dispResults:
     print(torch.absolute(U[:,0:nCols]-Uauto).max())
     print("Max abs deviation of grads: ")
     print(torch.absolute(thetas.grad-JVP).max())
-
-
