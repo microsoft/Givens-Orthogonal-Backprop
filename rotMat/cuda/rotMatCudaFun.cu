@@ -134,12 +134,14 @@ template <typename scalar_t, unsigned int blockSize>
   if (blockSize >= 64) { if (tid < 32 ) sA[tid] += sA[tid + 32]; __syncthreads(); }
 }
 
+
+// UNSTABLE?
 template <typename scalar_t, unsigned int blockSize>
   __device__ void warpReduce(
     volatile scalar_t* sdata, 
     const int &tid)
 {
-  __syncwarp();
+  //__syncwarp();
   if (blockSize >= 32) sdata[tid] += sdata[tid + 16];
   if (blockSize >= 16) sdata[tid] += sdata[tid + 8];
   if (blockSize >= 8) sdata[tid] += sdata[tid + 4];
@@ -781,15 +783,25 @@ std::pair<torch::Tensor, torch::Tensor> rotMatBackwardCudaTeamRR(
   torch::Tensor UX,
   torch::Tensor G)
 {
+  //std::cout << "000\n"; 
   auto constants = determineRotMatConstants(thetas.size(0), UX.size(0));
+  //std::cout << "001\n"; 
   auto C = torch::cos(thetas.detach());
+  //std::cout << "002\n"; 
   auto S = torch::sin(thetas.detach());
+  //std::cout << "003\n"; 
 
   auto thetasTensorOptions = torch::TensorOptions().dtype(thetas.dtype()).device(thetas.device());
+  //std::cout << "004\n"; 
+
   auto JVP = torch::zeros_like(thetas, thetasTensorOptions);
 
+  //std::cout << "running backwards"; 
   ScheduleInterTeamTournamentForThetaGrads(C, S, UX, G, JVP, constants);
+  //std::cout << " ran ScheduleInterTeamTournamentForThetaGrads ";
   ScheduleIntraTeamTournamentsForThetaGrads(C, S, UX, G, JVP, constants);
+  //std::cout << " ran ScheduleIntraTeamTournamentsForThetaGrads ";
+
 
   return std::make_pair(G, JVP);
 }

@@ -30,7 +30,7 @@ if teamSize <= 16: Ns = [teamSize, teamSize+1, teamSize *2 + 1]
 if teamSize <= 8: Ns.append(teamSize*4 + int(teamSize/3))
 
 Ms =Ns
-batch_sizes = [6, 15, 3,17, 25,26, 27,33]
+batch_sizes = [6, 15, 3, 32, 27,33, 17, 25, 26]
 
 parameters = [[x] for x in Ns]
 parameters = [x + [m] for m in Ms for x in parameters if  m <= x[0]]
@@ -40,7 +40,7 @@ parameters = [x + [rr] for rr in [False, True] for x in parameters]
 
 trialCount = 3
 for index, (N, M, batch, XisId, isTeamRR) in enumerate(parameters,start=1): 
-    #print(N, M, batch, XisId, isTeamRR)
+    print(N, M, batch, XisId, isTeamRR)
     for i in range(trialCount):
         if isTeamRR:
             rotUnit = GivensRotations.RotMatOpt(N, M).to(device)

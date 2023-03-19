@@ -25,8 +25,7 @@ print("N:",N, "| M:", M, "| #thetas:", nThetas, "| batch size:", batch_size,"\n"
 X = torch.randn(N,batch_size).to(dtype).to(device)
 G = torch.randn(X.size(0), X.size(1),requires_grad=True).to(dtype).to(device)
 thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
-
-for teamRR in [True, False]:
+for teamRR in [True]:
 
     if teamRR: print("Using Team RR Scheduling:") 
     else: print("Using Circle Method RR Scheduling:")
@@ -48,7 +47,7 @@ for teamRR in [True, False]:
     # Report in milliseconds
     forwardMilliseconds = startFwd.elapsed_time(endFwd)
     print('Forward time: {0:.5f}'.format(forwardMilliseconds))
-
+        
     startBck = torch.cuda.Event(enable_timing=True)
     endBck = torch.cuda.Event(enable_timing=True)
     startBck.record()
