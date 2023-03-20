@@ -14,7 +14,7 @@ N = 2000
 M = N
 K = N-M
 nThetas = int(N*(N-1)/2)
-batch_size =  32
+batch_size =  1024
 
 # To drop angle params we need to have at least the last *pair* of dimensions left out
 if K > 1:
@@ -25,7 +25,7 @@ print("N:",N, "| M:", M, "| #thetas:", nThetas, "| batch size:", batch_size,"\n"
 X = torch.randn(N,batch_size).to(dtype).to(device)
 G = torch.randn(X.size(0), X.size(1),requires_grad=True).to(dtype).to(device)
 thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
-for teamRR in [True]:
+for teamRR in [True,  False]:
 
     if teamRR: print("Using Team RR Scheduling:") 
     else: print("Using Circle Method RR Scheduling:")
@@ -58,4 +58,5 @@ for teamRR in [True]:
 
     # Report in milliseconds
     backwardMilliseconds = startBck.elapsed_time(endBck)
-    print('Backward time: {0:.5f}'.format(backwardMilliseconds), "\n")
+    print('Backward time: {0:.5f}'.format(backwardMilliseconds))
+    print('Total time: {0:.5f}'.format(forwardMilliseconds+backwardMilliseconds), "\n")

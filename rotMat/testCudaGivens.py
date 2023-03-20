@@ -17,7 +17,7 @@ dtype = torch.float32
 # To have same results
 torch.manual_seed(12)
 
-debug = True
+debug = False
 dispResults = False
 orgDispResults = dispResults
 
