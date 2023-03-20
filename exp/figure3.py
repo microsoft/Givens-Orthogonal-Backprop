@@ -24,21 +24,11 @@ from run_svd import run_svd, run_seq
 from run_exp import run_exp, run_cay
 
 import rotMatcuda as rotMatFn
-
-repeats = 100 
-#repeats = 50
-bs   	= 32 
-
-data = np.zeros((48, 5, repeats)) 
-
-print("batch size:", bs, "repeats:", repeats)
-print("| %-10s | %-10s | %-10s | %-10s | %-10s |"%("dimension", "FastH", "Cayley", "RotMat", "RotMat TRR"))
-
-
+import argparse
 
 def getThetaCount(N, M):
-    K = N-M
-    return int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
+	K = N-M
+	return int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
 
 def experiment_rotMat(d, bs, G): 
 	nThetas = getThetaCount(d,d)
@@ -84,20 +74,42 @@ def run_rotMat(d, bs, repeats, teamRR):
 	return np.array(times)
 
 
-for i, d in enumerate(range(64, 64*48+1, 64)): 
-#for i, d in enumerate(range(512, 2048+1, 512)): 
-	svd = run_svd(d, bs, repeats)
-	cay = run_cay(d, bs, repeats)
-	rotMat = run_rotMat(d, bs, repeats, False)
-	rotMatTeamRR = run_rotMat(d, bs, repeats, True)
-
-	data[i, 0, :] = svd
-	data[i, 1, :] = cay
-	data[i, 2, :] = rotMat
-	data[i, 3, :] = rotMatTeamRR
-
-	print("| %-10i | %-10f | %-10f | %-10f | %-10f |"%(d, data[i, 0, :].mean(), data[i, 1, :].mean(), data[i, 2, :].mean(), data[i, 3, :].mean()))
-	np.savez("rotMatComparison", data)
 	
-import plot  
-plot.plot()
+  
+def main(bs, repeats, exclude_cayley, exclude_fasth):
+
+	print("batch size:", bs, "repeats:", repeats)
+	print("| %-10s | %-10s | %-10s | %-10s | %-10s |"%("dimension", "FastH", "Cayley", "RotMat", "RotMat TRR"))
+ 
+	data = np.zeros((48, 5, repeats)) 
+ 
+	for i, d in enumerate(range(64, 64*48+1, 64)): 
+		svd = run_svd(d, bs, repeats)
+		cay = run_cay(d, bs, repeats)
+		rotMat = run_rotMat(d, bs, repeats, False)
+		rotMatTeamRR = run_rotMat(d, bs, repeats, True)
+
+		if not exclude_fasth: data[i, 0, :] = svd
+		if not exclude_cayley: data[i, 1, :] = cay
+		data[i, 2, :] = rotMat
+		data[i, 3, :] = rotMatTeamRR
+
+		print("| %-10i | %-10f | %-10f | %-10f | %-10f |"%(d, data[i, 0, :].mean(), data[i, 1, :].mean(), data[i, 2, :].mean(), data[i, 3, :].mean()))
+		np.savez("rotMatComparison_" + str(bs), data)
+ 
+	import plot
+	plot.plot(exclude_cayley, exclude_fasth)
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Accept Batch Size and Trial Count Parametes and Benchmark RotMat")
+    parser.add_argument("--bs", type=int, required=True, help="First argument Batch Size")
+    parser.add_argument("--repeats", type=int, required=True, help="Second argument Trial Count")
+    parser.add_argument("--exCayley", type=bool, required=False, help="Third optional argument to exclude Cayley Transform")
+    parser.add_argument("--exFasth", type=bool, required=False, help="Third optional argument to exclude Fasth Algorithm")
+    
+    args = parser.parse_args()
+    print(args)
+    main(args.bs, args.repeats, args.exCayley, args.exFasth)
+
