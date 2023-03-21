@@ -1,5 +1,14 @@
 # Reproduce Figure 3 
-To reproduce a small version of Figure 3 just run ```figure3.py``` (see below). The full experiment takes a few hours and can be run by changing a few lines in ```figure3.py```. 
+Cayley transform and fasth algorithm code is copied fromm the repository of 'What if Neural Networks had SVDs?"
+https://github.com/AlexanderMath/fasth
+
+@inproceedings{fasth,
+    title={\{W}hat if {N}eural {N}etworks had {SVD}s?},
+    author={Mathiasen, Alexander and Hvilsh{\o}j, Frederik and J{\o}rgensen, Jakob R{\o}dsgaard 
+    and Nasery, Anshul and Mottin, Davide},
+    booktitle={NeurIPS},
+    year={2020}
+}
 
 <p align="center">
 <img src="running_time.png" width="400px" height="200px" >
