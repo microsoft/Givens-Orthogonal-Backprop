@@ -1,4 +1,6 @@
-# Reproduce Figure 3 
+# Compare SOTA Orhogonal Matrix Forward+Backward Multiplication Algorithms with Givens-Orthogonal-Backprop
+
+
 Cayley transform and fasth algorithm code is copied fromm the repository of 'What if Neural Networks had SVDs?"
 https://github.com/AlexanderMath/fasth
 
