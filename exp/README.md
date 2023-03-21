@@ -13,7 +13,7 @@ https://github.com/AlexanderMath/fasth
 }
 
 <p align="center">
-<img src="running_time_line_logscale_32.png" width="400px" height="200px" >
+<img src="running_time_line_logscale_32.png" width="600px" height="600px" >
 </p>
 
 
