@@ -27,78 +27,78 @@ import rotMatcuda as rotMatFn
 import argparse
 
 def getThetaCount(N, M):
-	K = N-M
-	return int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
+    K = N-M
+    return int(N*(N-1)/2) if K <= 1 else int(N*(N-1)/2) - int(K*(K-1)/2)
 
 def experiment_rotMat(d, bs, G): 
-	nThetas = getThetaCount(d,d)
-	thetas  = torch.zeros(nThetas). normal_(0, np.pi)
-	thetas.requires_grad_(True)
+    nThetas = getThetaCount(d,d)
+    thetas  = torch.zeros(nThetas). normal_(0, np.pi)
+    thetas.requires_grad_(True)
 
-	X  = torch.zeros((d, bs)).normal_(0, 1)
-	torch.cuda.synchronize()
+    X  = torch.zeros((d, bs)).normal_(0, 1)
+    torch.cuda.synchronize()
 
-	# Start timing of forward and backwards pass. 
-	t0 = time.time()
-	UX = rotMatFn.forward(X, thetas)
-	rotMatFn.backward(thetas, UX, G)
-	torch.cuda.synchronize()
+    # Start timing of forward and backwards pass. 
+    t0 = time.time()
+    UX = rotMatFn.forward(X, thetas)
+    rotMatFn.backward(thetas, UX, G)
+    torch.cuda.synchronize()
 
-	return time.time() - t0
+    return time.time() - t0
 
 def experiment_rotMatTeamRR(d, bs, G): 
-	nThetas = getThetaCount(d,d)
-	thetas  = torch.zeros(nThetas). normal_(0, np.pi)
-	thetas.requires_grad_(True)
+    nThetas = getThetaCount(d,d)
+    thetas  = torch.zeros(nThetas). normal_(0, np.pi)
+    thetas.requires_grad_(True)
 
-	X  = torch.zeros((d, bs)).normal_(0, 1)
-	torch.cuda.synchronize()
+    X  = torch.zeros((d, bs)).normal_(0, 1)
+    torch.cuda.synchronize()
 
-	# Start timing of forward and backwards pass. 
-	t0 = time.time()
-	UX = rotMatFn.forwardTeamRR(X, thetas)
-	rotMatFn.backwardTeamRR(thetas, UX, G)
-	torch.cuda.synchronize()
-	return time.time() - t0
+    # Start timing of forward and backwards pass. 
+    t0 = time.time()
+    UX = rotMatFn.forwardTeamRR(X, thetas)
+    rotMatFn.backwardTeamRR(thetas, UX, G)
+    torch.cuda.synchronize()
+    return time.time() - t0
 
 
 def run_rotMat(d, bs, repeats, teamRR): 
-	times = [] 
-	G = torch.zeros((d, bs)).normal_(0, 1)  
-	
-	rotMatVersion = experiment_rotMatTeamRR if teamRR else experiment_rotMat
-	for i in range(repeats + 1):
-		t = rotMatVersion(d, bs, G)
-		if i > 0: times.append(t)
+    times = [] 
+    G = torch.zeros((d, bs)).normal_(0, 1)  
+    
+    rotMatVersion = experiment_rotMatTeamRR if teamRR else experiment_rotMat
+    for i in range(repeats + 1):
+        t = rotMatVersion(d, bs, G)
+        if i > 0: times.append(t)
 
-	return np.array(times)
+    return np.array(times)
 
 
-	
+    
   
 def main(bs, repeats, exclude_cayley, exclude_fasth):
 
-	print("batch size:", bs, "repeats:", repeats)
-	print("| %-10s | %-10s | %-10s | %-10s | %-10s |"%("dimension", "FastH", "Cayley", "RotMat", "RotMat TRR"))
+    print("batch size:", bs, "repeats:", repeats)
+    print("| %-10s | %-10s | %-10s | %-10s | %-10s |"%("dimension", "FastH", "Cayley", "RotMat", "RotMat TRR"))
  
-	data = np.zeros((48, 5, repeats)) 
+    data = np.zeros((48, 5, repeats)) 
  
-	for i, d in enumerate(range(64, 64*48+1, 64)): 
-		svd = run_svd(d, bs, repeats)
-		cay = run_cay(d, bs, repeats)
-		rotMat = run_rotMat(d, bs, repeats, False)
-		rotMatTeamRR = run_rotMat(d, bs, repeats, True)
+    for i, d in enumerate(range(64, 64*48+1, 64)): 
+        svd = run_svd(d, bs, repeats)
+        cay = run_cay(d, bs, repeats)
+        rotMat = run_rotMat(d, bs, repeats, False)
+        rotMatTeamRR = run_rotMat(d, bs, repeats, True)
 
-		if not exclude_fasth: data[i, 0, :] = svd
-		if not exclude_cayley: data[i, 1, :] = cay
-		data[i, 2, :] = rotMat
-		data[i, 3, :] = rotMatTeamRR
+        if not exclude_fasth: data[i, 0, :] = svd
+        if not exclude_cayley: data[i, 1, :] = cay
+        data[i, 2, :] = rotMat
+        data[i, 3, :] = rotMatTeamRR
 
-		print("| %-10i | %-10f | %-10f | %-10f | %-10f |"%(d, data[i, 0, :].mean(), data[i, 1, :].mean(), data[i, 2, :].mean(), data[i, 3, :].mean()))
-		np.savez("rotMatComparison_" + str(bs), data)
+        print("| %-10i | %-10f | %-10f | %-10f | %-10f |"%(d, data[i, 0, :].mean(), data[i, 1, :].mean(), data[i, 2, :].mean(), data[i, 3, :].mean()))
+        np.savez("rotMatComparison_" + str(bs), data)
  
-	import plot
-	plot.plot(exclude_cayley, exclude_fasth)
+        import plot
+        plot.plot(exclude_cayley, exclude_fasth)
 
 
 
@@ -110,6 +110,5 @@ if __name__ == "__main__":
     parser.add_argument("--exFasth", type=bool, required=False, help="Third optional argument to exclude Fasth Algorithm")
     
     args = parser.parse_args()
-    print(args)
-    main(args.bs, args.repeats, args.exCayley, args.exFasth)
+    main(bs, args.repeats, args.exCayley, args.exFasth)
 
