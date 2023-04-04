@@ -26,7 +26,7 @@ X = torch.randn(N,batch_size).to(dtype).to(device)
 G = torch.randn(X.size(0), X.size(1),requires_grad=True).to(dtype).to(device)
 thetas = torch.randn(nThetas,requires_grad=True).to(dtype).to(device)
 
-'''linear = torch.randn(N,N).to(dtype).to(device)
+linear = torch.randn(N,N).to(dtype).to(device)
 linear.requires_grad = True
 U = linear @ X  
 
@@ -58,7 +58,7 @@ torch.cuda.synchronize()
 # Report in milliseconds
 backwardMilliseconds = startBck.elapsed_time(endBck)
 print('Backward time: {0:.5f}'.format(backwardMilliseconds))
-print('Total time: {0:.5f}'.format(forwardMilliseconds+backwardMilliseconds), "\n")'''
+print('Total time: {0:.5f}'.format(forwardMilliseconds+backwardMilliseconds), "\n")
 
 
 _ = rotMatFn.backwardTeamRR(thetas,rotMatFn.forwardTeamRR(X, thetas),G)

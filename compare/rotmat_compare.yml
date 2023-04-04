@@ -1,4 +1,4 @@
-name: romat_compare
+name: rotmat_compare
 channels:
   - conda-forge
   - defaults
