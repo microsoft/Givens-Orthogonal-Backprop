@@ -1,4 +1,4 @@
-name: py37
+name: romat_compare
 channels:
   - conda-forge
   - defaults
