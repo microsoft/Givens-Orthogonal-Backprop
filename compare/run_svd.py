@@ -90,11 +90,14 @@ def exp(d, m, bs, G) :
 	V 		= torch.zeros((d, d)). normal_(0, 1)
 	X 		= torch.zeros((d, bs)).normal_(0, 1)
 	Bs 		= torch.zeros((d // m, d, bs))
-	torch.cuda.synchronize()
 
 	# Start timing of forward and backwards pass. 
-	t0 = time.time()
-
+	#t0 = time.time()
+	startFwd = torch.cuda.Event(enable_timing=True); endFwd = torch.cuda.Event(enable_timing=True)
+	torch.cuda.synchronize()
+ 
+	startFwd.record()
+ 
 	# Includes the time of normalization and cloning. 
 	# Time difference is 0.0131 to 0.0146. 
 	# Could be done faster if cloning / normalization was handled in CUDA code. 
@@ -104,9 +107,11 @@ def exp(d, m, bs, G) :
 	Y = algo_compute_dec(V, m)
 	algo_inv_mult(V, X, Y, m)
 	algo_backwards(V, W, output, G, norms, m)
-
-	return time.time() - t0
-
+	endFwd.record()
+	#return time.time() - t0
+	torch.cuda.synchronize()
+	
+	return startFwd.elapsed_time(endFwd)
 
 def run_svd(d, bs, repeats, m=None): 
 

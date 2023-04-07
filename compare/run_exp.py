@@ -19,15 +19,22 @@ def experiment_exp(d, bs, G, func):
 
 	V 		= V - V.t()  # make skew symmetric. 
 	V.requires_grad_(True)
-	torch.cuda.synchronize()
 	
 	# Start timing of forward and backwards pass. 
-	t0 = time.time()
+	#t0 = time.time()
+	startFwd = torch.cuda.Event(enable_timing=True)
+	endFwd = torch.cuda.Event(enable_timing=True)
+	torch.cuda.synchronize()
+	
+	startFwd.record()
 	y = X @ func(V) 
 	torch.autograd.backward( y, G )
 	torch.cuda.synchronize()
-	
-	return time.time() - t0
+	endFwd.record()
+	torch.cuda.synchronize()
+ 
+	#return time.time() - t0
+	return startFwd.elapsed_time(endFwd)
 
 def _run(d, bs, repeats, func): 
 	times = [] 

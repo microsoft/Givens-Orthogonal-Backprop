@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sys
 
-def plot(bs, exclude_cayley=False, exclude_fasth=False):
+def plot(bs, exclude_cayley=False, exclude_fasth=False, compareLinear=False):
     blue    = "C0"
     orange  = "C1"
     green   = "C2"
